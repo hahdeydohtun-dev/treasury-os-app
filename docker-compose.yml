@@ -1,0 +1,39 @@
+version: "3.9"
+
+# Provides the stateful services (Postgres, Redis) for local development.
+# The backend and frontend are run natively (see README.md) so hot-reload
+# and debugging work normally; they are not containerized at this stage.
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: treasury_os_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: treasury
+      POSTGRES_PASSWORD: treasury
+      POSTGRES_DB: treasury_os
+    ports:
+      - "5432:5432"
+    volumes:
+      - treasury_os_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U treasury -d treasury_os"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7
+    container_name: treasury_os_redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  treasury_os_postgres_data:

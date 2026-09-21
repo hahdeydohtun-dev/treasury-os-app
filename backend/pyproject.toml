@@ -1,0 +1,10 @@
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+# B008: FastAPI's Depends(...)/File(...)/Form(...) as default argument values
+# is the standard, documented pattern - not a real "function call in default
+# argument" bug. DTZ011: datetime.date.today() is fine for as-of defaults in
+# this codebase (no timezone ambiguity at date granularity).
+ignore = ["B008", "DTZ011"]
