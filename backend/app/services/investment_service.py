@@ -1,8 +1,21 @@
 """
 Investment orchestration service: lifecycle transitions, versioning on
-update, placement, termination (full/partial), rollover, and rebooking.
-Pure calculation lives in investment_engine.py; this module handles
-persistence + audit trail, mirroring app/services/facility_service.py.
+update, placement, termination (full/partial), rollover, rebooking, and
+maturity settlement. Pure calculation lives in investment_engine.py;
+this module handles persistence + audit trail, mirroring
+app/services/facility_service.py.
+
+Cash integration (Stage 4 financial-integrity hardening): every
+lifecycle event that changes liquidity creates exactly one
+TreasuryTransaction - the SAME single cash ledger every other Treasury
+OS module feeds (app/models/treasury_transaction.py) - never a second,
+parallel cash ledger. `InvestmentTransaction.cash_transaction_id` links
+the investment-side record to its cash-side record. A rollover is
+economically net-zero external cash movement (the same money leaves one
+investment and re-enters a new one) - it gets a single NON_CASH
+TreasuryTransaction purely for traceability, which the forecast engine
+and cash-position calculations both already exclude from actual cash
+flow (CashDirection.NON_CASH), so it can never double-count.
 
 Concurrency (SECTION 39, same discipline as Stage 3): every function
 here that mutates a shared financial balance (Investment.principal_amount,
@@ -29,7 +42,9 @@ from app.models.investment import (
     InvestmentTransactionType,
     InvestmentVersion,
 )
-from app.services.investment_engine import calculate_early_termination
+from app.models.lookup import CashDirection
+from app.models.treasury_transaction import TransactionStatus, TreasuryTransaction
+from app.services.investment_engine import calculate_early_termination, calculate_simple_interest
 
 
 async def load_investment_for_update(db: AsyncSession, investment_id: uuid.UUID) -> Investment | None:
@@ -49,6 +64,47 @@ def _investment_terms_snapshot(investment: Investment) -> dict:
         "partial_termination_allowed": investment.partial_termination_allowed,
         "rollover_allowed": investment.rollover_allowed,
     }
+
+
+def recompute_expected_interest(investment: Investment) -> Decimal:
+    """
+    SECTION 5/10: `expected_interest` is always the CURRENT projection
+    under CURRENT terms (current outstanding principal, current rate,
+    current maturity date) - never a stale figure left over from before
+    a partial termination, rate change, or maturity-date change. This is
+    a pure recomputation from the investment's current fields; it never
+    touches InvestmentVersion history (SECTION 5: "do not modify
+    historical InvestmentVersion records").
+    """
+    return calculate_simple_interest(
+        investment.principal_amount, investment.interest_rate, investment.start_date,
+        investment.maturity_date, investment.day_count_convention,
+    )
+
+
+async def _create_cash_transaction(
+    db: AsyncSession, investment: Investment, direction: CashDirection, event_type_code: str,
+    amount: Decimal, transaction_date: datetime.date, bank_account_id, user_id,
+    reference: str | None = None, narration: str | None = None,
+) -> TreasuryTransaction:
+    """
+    Creates exactly one row in the single canonical cash ledger
+    (TreasuryTransaction) for an investment lifecycle event. This is the
+    ONLY place Stage 4 writes to that table - every investment cash
+    effect goes through here, so there is exactly one cash-ledger entry
+    per real (or, for NON_CASH, per traceable-but-zero-effect) event.
+    """
+    cash_txn = TreasuryTransaction(
+        legal_entity_id=investment.legal_entity_id, event_type_code=event_type_code,
+        direction=direction, event_date=transaction_date, value_date=transaction_date,
+        transaction_currency_code=investment.currency_code, transaction_amount=amount,
+        bank_account_id=bank_account_id, reference=reference, narration=narration,
+        status=TransactionStatus.POSTED, source_type="INVESTMENT",
+        source_record_id=str(investment.id), created_by_user_id=user_id,
+    )
+    db.add(cash_txn)
+    await db.flush()
+    return cash_txn
 
 
 async def record_initial_version(db: AsyncSession, investment: Investment, user_id) -> None:
@@ -74,6 +130,11 @@ async def apply_investment_update(
             setattr(investment, field, value)
     investment.version += 1
     investment.updated_by_user_id = user_id
+
+    # SECTION 5: a rate or maturity-date change must immediately update
+    # the CURRENT projection - never left stale until some other event
+    # happens to touch it.
+    investment.expected_interest = recompute_expected_interest(investment)
 
     new_terms = _investment_terms_snapshot(investment)
     db.add(InvestmentVersion(
@@ -123,14 +184,18 @@ async def transition_investment_status(
     return investment
 
 
-async def place_investment(db: AsyncSession, investment: Investment, user_id) -> InvestmentTransaction:
+async def place_investment(
+    db: AsyncSession, investment: Investment, user_id, bank_account_id=None,
+) -> InvestmentTransaction:
     """
-    SECTION 11/12: idempotent - if a PLACEMENT transaction already
-    exists for this investment (checked under the row lock the caller
-    already holds), this raises rather than creating a second cash
-    movement. The caller (API endpoint) is expected to have already
-    checked investment.status; this function focuses on the
-    transaction-level idempotency guarantee.
+    SECTION 2/11/12/39: idempotent (a PLACEMENT transaction already
+    existing for this investment raises 409, backed at the database
+    level by ux_investment_transactions_one_placement) and creates
+    exactly one linked cash movement in the single canonical
+    TreasuryTransaction ledger - a real OUTFLOW, never merely displayed.
+    Cash sufficiency is validated by the caller (the API endpoint) using
+    the existing cash-position architecture BEFORE this is invoked; this
+    function focuses on atomically creating both records together.
     """
     existing_stmt = select(InvestmentTransaction).where(
         InvestmentTransaction.investment_id == investment.id,
@@ -140,12 +205,20 @@ async def place_investment(db: AsyncSession, investment: Investment, user_id) ->
     if existing is not None:
         raise HTTPException(status_code=409, detail="This investment has already been placed.")
 
+    placement_date = investment.placement_date or datetime.date.today()
+    cash_txn = await _create_cash_transaction(
+        db, investment, CashDirection.OUTFLOW, "INVESTMENT_PLACEMENT", investment.principal_amount,
+        placement_date, bank_account_id or investment.source_account_id, user_id,
+        reference=investment.investment_reference,
+        narration=f"Fixed deposit placement - {investment.investment_reference}",
+    )
+
     transaction = InvestmentTransaction(
         investment_id=investment.id, legal_entity_id=investment.legal_entity_id,
         transaction_type=InvestmentTransactionType.PLACEMENT, currency_code=investment.currency_code,
-        amount=investment.principal_amount, transaction_date=investment.placement_date or datetime.date.today(),
+        amount=investment.principal_amount, transaction_date=placement_date,
         status=InvestmentTransactionStatus.EXECUTED, created_by_user_id=user_id,
-        executed_by_user_id=user_id,
+        executed_by_user_id=user_id, cash_transaction_id=cash_txn.id,
     )
     db.add(transaction)
     investment.status = InvestmentStatus.ACTIVE
@@ -159,7 +232,7 @@ async def place_investment(db: AsyncSession, investment: Investment, user_id) ->
         related_record_type="InvestmentTransaction", created_by_user_id=user_id,
     ))
     await db.flush()
-    db.add(InvestmentEvent(  # link the transaction id now that it has one, in a second small event field
+    db.add(InvestmentEvent(
         investment_id=investment.id, event_type=InvestmentEventType.STATUS_CHANGED,
         event_date=datetime.datetime.now(datetime.UTC), description="Investment is now ACTIVE.",
         previous_value={"status": InvestmentStatus.PLACEMENT_PENDING.value},
@@ -171,15 +244,15 @@ async def place_investment(db: AsyncSession, investment: Investment, user_id) ->
 
 async def terminate_investment(
     db: AsyncSession, investment: Investment, amount: Decimal, termination_date: datetime.date,
-    user_id,
+    user_id, destination_account_id=None,
 ) -> tuple:
     """
-    SECTION 14/15: validates via the caller (validate_termination_amount)
-    before this is invoked. Reduces principal_amount, creates the
-    termination transaction (+ a separate PENALTY transaction if a
-    penalty applies), records the event, and sets status to
-    PARTIALLY_TERMINATED or TERMINATED depending on whether principal
-    remains outstanding afterward.
+    SECTION 3/5/15/39: reduces principal_amount, creates the termination
+    InvestmentTransaction, creates exactly one linked INFLOW
+    TreasuryTransaction whose amount reconciles EXACTLY to net_proceeds
+    (never principal or interest alone - SECTION 3), and recomputes
+    expected_interest on the remaining outstanding balance under
+    current terms (SECTION 5) - never left stale.
     """
     is_full = amount >= investment.principal_amount
     proportion = amount / investment.original_principal_amount if investment.original_principal_amount else Decimal(1)
@@ -192,6 +265,15 @@ async def terminate_investment(
         proportion_of_total=proportion,
     )
 
+    account_for_proceeds = destination_account_id or investment.destination_account_id or investment.source_account_id
+    cash_txn = await _create_cash_transaction(
+        db, investment, CashDirection.INFLOW, "INVESTMENT_TERMINATION", result.net_proceeds,
+        termination_date, account_for_proceeds, user_id, reference=investment.investment_reference,
+        narration=f"{'Full' if is_full else 'Partial'} early termination proceeds - "
+                  f"{investment.investment_reference} (principal {result.principal_returned}, "
+                  f"interest {result.interest_earned}, penalty {result.penalty})",
+    )
+
     transaction_type = (
         InvestmentTransactionType.FULL_TERMINATION if is_full
         else InvestmentTransactionType.PARTIAL_TERMINATION
@@ -201,7 +283,7 @@ async def terminate_investment(
         transaction_type=transaction_type, currency_code=investment.currency_code,
         amount=result.net_proceeds, transaction_date=termination_date,
         status=InvestmentTransactionStatus.EXECUTED, created_by_user_id=user_id,
-        executed_by_user_id=user_id,
+        executed_by_user_id=user_id, cash_transaction_id=cash_txn.id,
         description=f"Principal returned {result.principal_returned}, interest earned "
                     f"{result.interest_earned}, penalty {result.penalty}.",
     )
@@ -214,6 +296,8 @@ async def terminate_investment(
             amount=result.penalty, transaction_date=termination_date,
             status=InvestmentTransactionStatus.EXECUTED, created_by_user_id=user_id,
             executed_by_user_id=user_id,
+            description="Penalty component of the net proceeds above - not a separate cash "
+                        "movement (already netted into the termination's single cash transaction).",
         ))
 
     investment.principal_amount = max(Decimal(0), investment.principal_amount - amount)
@@ -221,6 +305,10 @@ async def terminate_investment(
         InvestmentStatus.TERMINATED if investment.principal_amount == 0
         else InvestmentStatus.PARTIALLY_TERMINATED
     )
+    # SECTION 5/10: recompute the CURRENT projected interest on whatever
+    # principal remains outstanding - never left stale at the pre-
+    # termination figure.
+    investment.expected_interest = recompute_expected_interest(investment)
 
     event_type = (
         InvestmentEventType.FULL_TERMINATION if is_full else InvestmentEventType.PARTIAL_TERMINATION
@@ -238,18 +326,89 @@ async def terminate_investment(
     return transaction, result
 
 
+async def settle_maturity(
+    db: AsyncSession, investment: Investment, settlement_date: datetime.date, user_id,
+    destination_account_id=None, actual_interest: Decimal | None = None,
+) -> InvestmentTransaction:
+    """
+    SECTION 4: an EXPLICIT, deliberate action - the maturity date passing
+    on its own does nothing (never automatic). Settles the full
+    outstanding principal + interest as one MATURITY_SETTLEMENT
+    InvestmentTransaction with a linked INFLOW TreasuryTransaction, and
+    moves the investment to MATURED. `actual_interest` lets the caller
+    record the actually-received interest if it differs from the
+    projected `expected_interest` (e.g. a variable-rate true-up); when
+    omitted, the current expected_interest (already kept fresh by
+    recompute_expected_interest) is used.
+    """
+    existing_stmt = select(InvestmentTransaction).where(
+        InvestmentTransaction.investment_id == investment.id,
+        InvestmentTransaction.transaction_type == InvestmentTransactionType.MATURITY_SETTLEMENT,
+    )
+    existing = (await db.execute(existing_stmt)).scalars().first()
+    if existing is not None:
+        raise HTTPException(status_code=409, detail="This investment has already been settled at maturity.")
+
+    principal = investment.principal_amount
+    interest = actual_interest if actual_interest is not None else investment.expected_interest
+    total_proceeds = principal + interest
+
+    account_for_proceeds = destination_account_id or investment.destination_account_id or investment.source_account_id
+    cash_txn = await _create_cash_transaction(
+        db, investment, CashDirection.INFLOW, "INVESTMENT_MATURITY", total_proceeds,
+        settlement_date, account_for_proceeds, user_id, reference=investment.investment_reference,
+        narration=f"Maturity settlement - {investment.investment_reference} "
+                  f"(principal {principal}, interest {interest})",
+    )
+
+    transaction = InvestmentTransaction(
+        investment_id=investment.id, legal_entity_id=investment.legal_entity_id,
+        transaction_type=InvestmentTransactionType.MATURITY_SETTLEMENT,
+        currency_code=investment.currency_code, amount=total_proceeds, transaction_date=settlement_date,
+        status=InvestmentTransactionStatus.EXECUTED, created_by_user_id=user_id,
+        executed_by_user_id=user_id, cash_transaction_id=cash_txn.id,
+        description=f"Principal {principal} + interest {interest} settled at maturity.",
+    )
+    db.add(transaction)
+
+    investment.received_interest = (investment.received_interest or Decimal(0)) + interest
+    investment.principal_amount = Decimal(0)
+    investment.status = InvestmentStatus.MATURED
+
+    db.add(InvestmentEvent(
+        investment_id=investment.id, event_type=InvestmentEventType.MATURED,
+        event_date=datetime.datetime.now(datetime.UTC),
+        description=f"Matured and settled: principal {principal} + interest {interest} "
+                    f"= {total_proceeds}.",
+        amount=total_proceeds, currency_code=investment.currency_code,
+        related_record_type="InvestmentTransaction", related_record_id=str(transaction.id),
+        created_by_user_id=user_id,
+    ))
+    await db.flush()
+    return transaction
+
+
 async def rollover_investment(
     db: AsyncSession, original: Investment, rollover_amount: Decimal, new_rate: Decimal,
     new_start_date: datetime.date, new_maturity_date: datetime.date, new_reference: str, user_id,
 ) -> Investment:
     """
-    SECTION 16: creates a genuinely NEW Investment row for the rolled
-    portion - the original's own rate/maturity/terms are never
+    SECTION 7/16/39: creates a genuinely NEW Investment row for the
+    rolled portion - the original's own rate/maturity/terms are never
     overwritten. Explicit lineage via previous_investment_id /
-    rolled_to_investment_id. A full rollover (rollover_amount ==
-    outstanding principal) closes the original as ROLLED_OVER; a
-    partial rollover reduces the original's outstanding principal and
-    leaves it ACTIVE for the remainder.
+    rolled_to_investment_id.
+
+    Cash treatment (SECTION 7): a rollover is economically net-zero
+    external cash movement - the same money leaves one investment and
+    re-enters a new one, so this does NOT create two separate offsetting
+    OUTFLOW/INFLOW TreasuryTransactions (which would each show up as a
+    large, unrelated-looking liquidity event). Instead it creates exactly
+    ONE NON_CASH TreasuryTransaction, referenced by both the original's
+    ROLLOVER InvestmentTransaction and the new investment's PLACEMENT
+    InvestmentTransaction, purely for traceability - CashDirection.NON_CASH
+    is already excluded from cash-position and forecast net-flow
+    calculations elsewhere in the codebase, so this can never be
+    double-counted as real liquidity.
 
     Idempotent by construction: this is only ever invoked once per
     rollover request by the API endpoint, which first re-validates the
@@ -260,6 +419,13 @@ async def rollover_investment(
     investments from one origin.
     """
     is_full = rollover_amount >= original.principal_amount
+
+    cash_txn = await _create_cash_transaction(
+        db, original, CashDirection.NON_CASH, "INVESTMENT_ROLLOVER", rollover_amount,
+        new_start_date, original.source_account_id, user_id, reference=new_reference,
+        narration=f"Rollover of {original.investment_reference} into {new_reference} "
+                  f"- internal, no net external cash movement.",
+    )
 
     tenor_days = (new_maturity_date - new_start_date).days
     new_investment = Investment(
@@ -289,7 +455,7 @@ async def rollover_investment(
         transaction_type=InvestmentTransactionType.PLACEMENT, currency_code=new_investment.currency_code,
         amount=rollover_amount, transaction_date=new_start_date,
         status=InvestmentTransactionStatus.EXECUTED, created_by_user_id=user_id,
-        executed_by_user_id=user_id, related_investment_id=original.id,
+        executed_by_user_id=user_id, related_investment_id=original.id, cash_transaction_id=cash_txn.id,
         description=f"Rollover placement from {original.investment_reference}.",
     ))
 
@@ -298,13 +464,17 @@ async def rollover_investment(
     original.status = (
         InvestmentStatus.ROLLED_OVER if is_full else InvestmentStatus.PARTIALLY_TERMINATED
     )
+    # SECTION 5/10: the remaining (unrolled) portion of the original, if
+    # any, gets its expected interest recomputed on its own current
+    # outstanding principal.
+    original.expected_interest = recompute_expected_interest(original)
 
     db.add(InvestmentTransaction(
         investment_id=original.id, legal_entity_id=original.legal_entity_id,
         transaction_type=InvestmentTransactionType.ROLLOVER, currency_code=original.currency_code,
         amount=rollover_amount, transaction_date=new_start_date,
         status=InvestmentTransactionStatus.EXECUTED, created_by_user_id=user_id,
-        executed_by_user_id=user_id, related_investment_id=new_investment.id,
+        executed_by_user_id=user_id, related_investment_id=new_investment.id, cash_transaction_id=cash_txn.id,
         description=f"Rolled over to {new_investment.investment_reference}.",
     ))
     db.add(InvestmentEvent(
@@ -323,15 +493,44 @@ async def rollover_investment(
 async def rebook_investment(
     db: AsyncSession, investment: Investment, new_rate: Decimal | None,
     new_maturity_date: datetime.date | None, additional_principal: Decimal, reason: str, user_id,
+    bank_account_id=None, idempotency_key: str | None = None,
 ) -> Investment:
     """
-    SECTION 17: rebooking amends the SAME investment's terms (unlike
+    SECTION 6/17: rebooking amends the SAME investment's terms (unlike
     rollover, which creates a new investment record) - implemented as a
     new InvestmentVersion, never a silent overwrite of history. Any
-    additional principal is recorded as its own REBOOKING transaction so
-    the cash impact is traceable, exactly like every other financial
-    event in this module.
+    additional principal creates a real linked OUTFLOW TreasuryTransaction
+    (the same cash-impact treatment as a placement), so a 50m -> 60m
+    rebooking's 10m top-up is reflected in the cash ledger exactly like
+    the spec's worked example requires - never silently absorbed into
+    the new 60m figure without a corresponding cash movement.
+
+    SECTION 2 (final freeze patch): idempotency here covers the ENTIRE
+    rebooking operation - additional principal, rate changes, maturity
+    changes, or any combination - not merely the cash-outflow path. The
+    check is against `InvestmentEvent` (event_type=REBOOKED,
+    reference=idempotency_key), because an InvestmentEvent is the ONE
+    thing every successful rebooking call unconditionally creates,
+    regardless of whether additional_principal is zero. An earlier
+    version of this function checked InvestmentTransaction instead, which
+    is only created when additional_principal > 0 - a rate-only or
+    maturity-only rebooking retried with the same key would have slipped
+    through undetected and applied the change a second time (a genuine
+    bug, caught and fixed in this pass). The check runs BEFORE any
+    mutation (no apply_investment_update, no version, no transaction, no
+    event) so a detected retry is a true no-op - the investment is
+    returned completely unchanged.
     """
+    if idempotency_key is not None:
+        existing_stmt = select(InvestmentEvent).where(
+            InvestmentEvent.investment_id == investment.id,
+            InvestmentEvent.event_type == InvestmentEventType.REBOOKED,
+            InvestmentEvent.reference == idempotency_key,
+        )
+        existing = (await db.execute(existing_stmt)).scalars().first()
+        if existing is not None:
+            return investment
+
     changes: dict = {}
     if new_rate is not None:
         changes["interest_rate"] = new_rate
@@ -345,19 +544,26 @@ async def rebook_investment(
     await apply_investment_update(db, investment, changes, reason, user_id)
 
     if additional_principal:
+        cash_txn = await _create_cash_transaction(
+            db, investment, CashDirection.OUTFLOW, "INVESTMENT_PLACEMENT", additional_principal,
+            datetime.date.today(), bank_account_id or investment.source_account_id, user_id,
+            reference=investment.investment_reference,
+            narration=f"Additional principal funding - {investment.investment_reference}: {reason}",
+        )
         db.add(InvestmentTransaction(
             investment_id=investment.id, legal_entity_id=investment.legal_entity_id,
             transaction_type=InvestmentTransactionType.REBOOKING, currency_code=investment.currency_code,
             amount=additional_principal, transaction_date=datetime.date.today(),
             status=InvestmentTransactionStatus.EXECUTED, created_by_user_id=user_id,
-            executed_by_user_id=user_id, description=reason,
+            executed_by_user_id=user_id, cash_transaction_id=cash_txn.id, description=reason,
+            idempotency_key=idempotency_key,
         ))
 
     db.add(InvestmentEvent(
         investment_id=investment.id, event_type=InvestmentEventType.REBOOKED,
         event_date=datetime.datetime.now(datetime.UTC), description=reason,
         amount=additional_principal or None, currency_code=investment.currency_code,
-        created_by_user_id=user_id,
+        reference=idempotency_key, created_by_user_id=user_id,
     ))
     await db.flush()
     return investment

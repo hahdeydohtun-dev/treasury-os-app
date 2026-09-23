@@ -120,6 +120,31 @@ async def demo_currencies(db_session: AsyncSession) -> list:
 
 
 @pytest_asyncio.fixture
+async def cash_event_types(db_session: AsyncSession):
+    """
+    Seeds the CashEventType rows Stage 4's cash-integration hardening
+    pass needs (app/services/investment_service.py writes real
+    TreasuryTransaction rows referencing these codes for placement,
+    termination, maturity settlement, and rollover). Idempotent (checks
+    existence first) so it composes safely with any other fixture that
+    might also seed reference data.
+    """
+    from app.models.lookup import CashDirection, CashEventType
+
+    codes = [
+        ("INVESTMENT_PLACEMENT", "Investment Placement", CashDirection.OUTFLOW),
+        ("INVESTMENT_MATURITY", "Investment Maturity", CashDirection.INFLOW),
+        ("INVESTMENT_TERMINATION", "Investment Early Termination Proceeds", CashDirection.INFLOW),
+        ("INVESTMENT_INTEREST_RECEIPT", "Investment Interest Receipt", CashDirection.INFLOW),
+        ("INVESTMENT_ROLLOVER", "Investment Rollover (internal, non-cash)", CashDirection.NON_CASH),
+    ]
+    for code, name, direction in codes:
+        if await db_session.get(CashEventType, code) is None:
+            db_session.add(CashEventType(code=code, name=name, default_direction=direction))
+    await db_session.flush()
+
+
+@pytest_asyncio.fixture
 async def demo_group_and_entities(db_session: AsyncSession, demo_currencies):
     from app.models.entity import Group, LegalEntity
 
@@ -252,7 +277,7 @@ async def facility_types(db_session: AsyncSession):
 
 
 @pytest_asyncio.fixture
-async def investment_types(db_session: AsyncSession):
+async def investment_types(db_session: AsyncSession, cash_event_types):
     from app.models.investment import InvestmentType
 
     for code, name, is_implemented in [

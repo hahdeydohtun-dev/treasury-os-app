@@ -17,6 +17,26 @@ from app.db.base_class import Base, TimestampMixin, UUIDPKMixin
 
 
 class BankBalance(Base, UUIDPKMixin, TimestampMixin):
+    """
+    A reported balance snapshot for one bank account on one date (e.g.
+    from a bank statement or an end-of-day feed) - never a computed
+    running balance.
+
+    balance_date semantics (documented explicitly per the Stage 4 final
+    financial-integrity patch, SECTION 4): a BankBalance row dated D is
+    treated as ALREADY REFLECTING every cash movement that settled ON OR
+    BEFORE D. This is the standard "anchor to the last statement date"
+    treasury convention - a same-day statement is assumed current as of
+    the end of that day. `app/services/cash_position_service.py::
+    calculate_operational_available_cash` relies on exactly this
+    convention: it only treats a TreasuryTransaction as "not yet
+    reflected" when that transaction's own event_date is STRICTLY AFTER
+    the latest BankBalance's balance_date for that account - never on or
+    before it. This is a documentation of an existing, tested convention
+    (not a new architecture decision); it has not been contradicted by
+    any test, so the convention is retained as-is per the instruction not
+    to change the architecture absent evidence it is wrong.
+    """
     __tablename__ = "bank_balances"
     __table_args__ = (
         UniqueConstraint(

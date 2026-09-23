@@ -286,6 +286,17 @@ class InvestmentTransaction(Base, UUIDPKMixin, TimestampMixin):
     represents the instrument; rows here represent actual financial
     activity (placement, interest accrual/receipt, termination,
     rollover, rebooking, penalty, maturity settlement).
+
+    `cash_transaction_id` links this row to the corresponding entry in
+    the SAME single treasury cash ledger every other module feeds
+    (`TreasuryTransaction` - see app/models/treasury_transaction.py) -
+    Stage 4 does not maintain a second cash ledger. Not every
+    InvestmentTransaction has a real external cash effect (e.g. a
+    ROLLOVER is economically net-zero - see
+    docs/STAGE_4_INVESTMENTS.md, "Cash integration"), so this is
+    nullable; where it IS set, that TreasuryTransaction is the single
+    source of truth for this event's cash impact - this table never
+    duplicates or overrides that amount.
     """
     __tablename__ = "investment_transactions"
 
@@ -294,6 +305,20 @@ class InvestmentTransaction(Base, UUIDPKMixin, TimestampMixin):
     )
     legal_entity_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("legal_entities.id"), nullable=False, index=True
+    )
+    cash_transaction_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("treasury_transactions.id"), nullable=True, index=True
+    )
+    idempotency_key: Mapped[str | None] = mapped_column(
+        String(150), nullable=True,
+        comment="SECTION 5 (Stage 4 final financial-integrity patch): a "
+                "client-supplied request identity, consistent with the "
+                "Stage 3 idempotency pattern of backing an application-level "
+                "check with a database constraint. A retried rebooking "
+                "request carrying the same key against the same investment "
+                "is detected via ux_investment_transactions_idempotency_key "
+                "and returns the already-applied result rather than "
+                "creating a second cash movement.",
     )
     transaction_type: Mapped[InvestmentTransactionType] = mapped_column(nullable=False, index=True)
     currency_code: Mapped[str] = mapped_column(String(3), nullable=False)

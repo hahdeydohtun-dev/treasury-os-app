@@ -144,3 +144,113 @@ async def calculate_net_movement(
     for direction, total in result.all():
         totals[direction.value] = total or Decimal(0)
     return totals
+
+
+@dataclass
+class OperationalCashPositionResult:
+    """
+    SECTION 1 (Stage 4 final financial-integrity patch): distinguishes
+
+        A. externally reported bank cash  -> reported_available_balance,
+           anchored to reported_balance_date (the BankBalance snapshot -
+           never mutated by this module; still the sole source of "what
+           the bank says we have")
+        B. operational available cash     -> operational_available_cash
+           (what this module computes and what placement/rebooking
+           validation actually uses)
+        C. treasury movements not yet reflected in that snapshot ->
+           unreflected_inflows / unreflected_outflows (posted
+           TreasuryTransaction rows on this account dated AFTER the
+           reported balance's own balance_date)
+
+    Formula (SECTION 1):
+        operational_available_cash
+            = reported_available_balance
+            + unreflected_inflows
+            - unreflected_outflows
+
+    This is deliberately NOT a second cash ledger: TreasuryTransaction
+    remains the only transaction table, BankBalance remains the only
+    externally-reported-balance table, and BankBalance itself is never
+    mutated here (SECTION 1: "do NOT simply mutate BankBalance"). This
+    function only ever READS both and combines them at query time.
+    """
+    bank_account_id: uuid.UUID | None
+    currency_code: str
+    reported_balance_date: datetime.date | None
+    reported_available_balance: Decimal
+    unreflected_inflows: Decimal
+    unreflected_outflows: Decimal
+    operational_available_cash: Decimal
+
+
+async def calculate_operational_available_cash(
+    db: AsyncSession, bank_account_id: uuid.UUID,
+) -> OperationalCashPositionResult:
+    """
+    SECTION 1/7: the authoritative "can this specific bank account
+    actually fund this?" figure - used by investment placement and
+    rebooking (and available for any future module with the same need,
+    e.g. Stage 3 facilities, without duplicating this logic).
+
+    See app.models.balance.BankBalance's own docstring for the explicit
+    documented convention behind balance_date (SECTION 4 of the Stage 4
+    final financial-integrity patch) - this function's anchoring logic
+    below implements exactly that convention.
+
+    Double-count protection (SECTION 7): a TreasuryTransaction is only
+    counted as "unreflected" while its event_date is AFTER the latest
+    BankBalance's own balance_date. Once a later balance import arrives
+    dated on or after that transaction's event_date, the bank's own
+    reported figure is assumed to already include it (the standard
+    "anchor to the last statement date" treasury convention), so it
+    naturally drops out of the unreflected sum - it is never subtracted
+    twice. A transaction dated exactly ON the balance's own date is
+    treated as already reflected (same-day statements are assumed
+    current as of end of that day).
+    """
+    balances = await _latest_balances(db, bank_account_id=bank_account_id)
+    if not balances:
+        # No balance has ever been reported for this account - the only
+        # information available is the treasury's own posted movements,
+        # anchored to "the beginning of time" rather than inventing a
+        # reported balance that doesn't exist.
+        account = await db.get(BankAccount, bank_account_id)
+        currency_code = account.currency_code if account else ""
+        anchor_date = datetime.date.min
+        reported_available = Decimal(0)
+        reported_balance_date = None
+    else:
+        balance = balances[0]
+        currency_code = balance.currency_code
+        anchor_date = balance.balance_date
+        reported_balance_date = balance.balance_date
+        reported_available = (
+            balance.available_balance if balance.available_balance is not None
+            else balance.closing_balance or Decimal(0)
+        )
+
+    stmt = (
+        select(TreasuryTransaction.direction, func.sum(TreasuryTransaction.transaction_amount))
+        .where(
+            TreasuryTransaction.bank_account_id == bank_account_id,
+            TreasuryTransaction.status == TransactionStatus.POSTED,
+            TreasuryTransaction.event_date > anchor_date,
+            TreasuryTransaction.direction.in_([CashDirection.INFLOW, CashDirection.OUTFLOW]),
+        )
+        .group_by(TreasuryTransaction.direction)
+    )
+    result = await db.execute(stmt)
+    totals = {CashDirection.INFLOW.value: Decimal(0), CashDirection.OUTFLOW.value: Decimal(0)}
+    for direction, total in result.all():
+        totals[direction.value] = total or Decimal(0)
+
+    operational = reported_available + totals[CashDirection.INFLOW.value] - totals[CashDirection.OUTFLOW.value]
+
+    return OperationalCashPositionResult(
+        bank_account_id=bank_account_id, currency_code=currency_code,
+        reported_balance_date=reported_balance_date, reported_available_balance=reported_available,
+        unreflected_inflows=totals[CashDirection.INFLOW.value],
+        unreflected_outflows=totals[CashDirection.OUTFLOW.value],
+        operational_available_cash=operational,
+    )

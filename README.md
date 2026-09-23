@@ -1,10 +1,24 @@
-# Treasury OS — Foundation
+# Treasury OS
 
-Multi-entity, multi-currency Treasury Management System. This is the
-**foundation stage only**: project structure, auth, RBAC, currency/FX admin,
-audit trail, and the frontend shell. Treasury modules (payments,
-reconciliation, forecasting, etc.) are not yet implemented — see
-`DEVELOPMENT_ROADMAP.md`.
+Multi-entity, multi-currency Treasury Management System.
+
+## Stage status
+
+| Stage | Status |
+|---|---|
+| Stage 0 — Foundation | Complete |
+| Stage 1 — Treasury Data Foundation + Excel Data Hub | Complete |
+| Stage 2 — 13-Week Cash Flow Forecast Engine | Complete |
+| Stage 2 Hardening — RBAC / entity isolation / security | Complete |
+| Stage 3 — Funding & Credit Facilities | Complete |
+| Stage 3 Hardening — integrity / concurrency / idempotency / repository security | Complete |
+| Stage 4 — Investments & Fixed Deposit Management | Complete (including financial-integrity/cash-ledger hardening) |
+| Stage 5 — Bank Reconciliation | **Not Started** |
+
+See `DEVELOPMENT_ROADMAP.md` for the full build history and what's planned
+next, and `docs/` for a per-stage architecture doc and implementation
+report (e.g. `docs/STAGE_4_INVESTMENTS.md`,
+`docs/STAGE_4_IMPLEMENTATION_REPORT.md`).
 
 ## Stack
 
@@ -12,6 +26,72 @@ reconciliation, forecasting, etc.) are not yet implemented — see
 - Frontend: Next.js 14 (App Router), React, TypeScript
 - Background processing (wired for later use): Redis, Celery
 - Auth: JWT access/refresh tokens, entity-scoped RBAC
+
+## Architecture at a glance
+
+- **Cash ledger**: every module (bank transactions, facility drawdowns/
+  repayments, investment placements/terminations/maturities) feeds the
+  *same single* `TreasuryTransaction` table
+  (`app/models/treasury_transaction.py`) via `event_type_code` and
+  `source_type`/`source_record_id` - there is no per-module parallel cash
+  ledger anywhere in the codebase.
+- **Cash position**: `app/services/cash_position_service.py` derives
+  available/total cash from the latest reported `BankBalance` per
+  account - the authoritative source every cash-sufficiency check (e.g.
+  investment placement) uses server-side, never a client-supplied figure.
+  `calculate_operational_available_cash` additionally rolls forward any
+  posted `TreasuryTransaction` movements dated after that balance's own
+  `balance_date` (documented convention: a balance dated `D` is treated
+  as already reflecting everything through `D` - see
+  `app/models/balance.py::BankBalance` and
+  `docs/STAGE_4_INVESTMENTS.md`), without ever mutating `BankBalance`
+  itself or creating a second cash ledger.
+- **Forecast engine**: `app/services/forecast_engine.py` is the single
+  13-week forecast calculator; each module (facilities, investments)
+  feeds it through its own small, clean adapter
+  (`facility_forecast_adapter.py`, `investment_forecast_adapter.py`)
+  rather than the engine having module-specific logic baked in.
+- **RBAC/entity isolation**: `app/auth/authorization.py` is the single
+  authorization module every endpoint in every stage uses -
+  `assert_entity_access` for single-record operations,
+  `get_authorized_scope`/`resolve_scope_entity_ids`/
+  `apply_resolved_entity_scope` for lists and aggregates. No module has
+  ever introduced a second authorization system.
+- **Versioning**: material commercial terms (FX rates, facility terms,
+  investment terms) are never overwritten in place - a change always
+  creates a new version row, and the current record's own fields are the
+  only thing endpoints read for "current" values.
+- **Financial calculations**: `Decimal` throughout, never floating point.
+
+## Investment lifecycle (Stage 4)
+
+`Investment.status`: `DRAFT -> SUBMITTED -> UNDER_REVIEW -> APPROVED ->
+PLACEMENT_PENDING -> ACTIVE -> {MATURED, PARTIALLY_TERMINATED,
+TERMINATED, ROLLED_OVER, REBOOKED}`, enforced by an explicit transition
+table. Creating an investment never places it; placement, termination,
+rollover, rebooking, and maturity settlement are all separate, explicit,
+row-locked, idempotent actions - see `docs/STAGE_4_INVESTMENTS.md` for
+the full design.
+
+**Cash integration**: placement creates a real `OUTFLOW`
+`TreasuryTransaction` from the source bank account (validated against
+that account's real available cash and currency - never trusted from the
+client); termination creates an `INFLOW` reconciling exactly to net
+proceeds; maturity settlement is an explicit action (never automatic on
+the date passing) creating an `INFLOW` for principal + interest;
+rollover creates exactly one `NON_CASH` traceability record (never two
+offsetting real cash movements, since the money never actually leaves
+the entity); rebooking's additional principal is a real `OUTFLOW`. Every
+`InvestmentTransaction` that has a real cash effect links to its
+`TreasuryTransaction` via `cash_transaction_id`.
+
+## Multi-entity / multi-currency
+
+Every facility and investment belongs to exactly one legal entity and
+carries its own transaction currency - never silently converted. RBAC is
+enforced at every layer (single-record, list, aggregate, Excel import,
+forecast) for every module, verified by dedicated cross-entity and
+cross-group regression tests throughout the test suite.
 
 ## Prerequisites
 
@@ -46,16 +126,19 @@ cd backend
 python3 -m venv .venv
 source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-cp .env.example .env 2>/dev/null || true   # or copy from repo-root .env.example
+cp ../.env.example .env          # then edit SECRET_KEY etc. for your environment
 ```
 
-Ensure `backend/.env` has (defaults already match the Docker Compose values):
+`backend/.env` needs at minimum:
 
 ```
 DATABASE_URL=postgresql+asyncpg://treasury:treasury@localhost:5432/treasury_os
 DATABASE_URL_SYNC=postgresql+psycopg2://treasury:treasury@localhost:5432/treasury_os
 SECRET_KEY=<replace with a real secret>
 ```
+
+`backend/.env` is git-ignored - never commit it. Only `.env.example`
+(root) is tracked, containing safe placeholder values.
 
 Run migrations:
 
@@ -78,9 +161,10 @@ Run tests:
 pytest -q
 ```
 
-(11 tests: health check, password/JWT security, login flow, entity-scoped
-RBAC authorization rules, and FX-rate versioning — confirms a corrected FX
-rate creates a new version and never overwrites the original row.)
+158 tests across Stage 0-4 (facilities, funding actions, forecast
+engine, security/RBAC hardening, Excel Data Hub, investments, and the
+Stage 3/4 financial-integrity/concurrency hardening passes) - all
+passing as of this stage.
 
 ## 3. Frontend setup
 
@@ -101,9 +185,8 @@ NEXT_PUBLIC_API_BASE_URL=http://localhost:8000/api/v1
 
 ## 4. Create your first user
 
-The foundation ships with no seeded users. Create one directly against the
-API (there is no public signup endpoint by design — user provisioning is an
-administrative action):
+There is no public signup endpoint by design — user provisioning is an
+administrative action. Create one directly against the API:
 
 ```bash
 cd backend
@@ -130,62 +213,36 @@ asyncio.run(main())
 EOF
 ```
 
-A superuser bypasses RBAC scoping entirely (see
-`app/auth/dependencies.py::_grants_permission`). For a non-superuser, you
+A superuser bypasses RBAC scoping entirely. For a non-superuser, you
 also need to create a `Role`, attach `Permission` rows for the
 (module, action) pairs they need, and a `UserRoleAssignment` binding the
-user to that role at `GROUP_WIDE` or `ENTITY` scope. This will get a proper
-admin UI/endpoint in a later stage — for now it's direct DB/ORM work.
+user to that role at `GROUP_WIDE` or `ENTITY` scope. This is direct
+DB/ORM work — there is no admin UI for it yet.
 
 Then log in at http://localhost:3000/login with `admin@example.com` /
 `ChangeMe123!`.
 
-## What's verified working
-
-- `alembic upgrade head` runs clean against a fresh Postgres 16 database
-  (32 tables as of Stage 2, plus Stage 2 Hardening).
-- `pytest -q` → 52 passed.
-- `uvicorn app.main:app` starts and serves `/health`, `/api/v1/currencies`,
-  and the full Stage 0-2 API surface.
-- `npm run build` compiles the frontend with no errors (10 routes).
-- `npm run start` serves `/dashboard`, `/login`, `/cash-liquidity`,
-  `/banks-accounts`, `/excel-data-hub`, and `/forecast` (200 OK), talking
-  to the live backend.
-- The Excel upload → validate → preview → confirm → import workflow was
-  exercised end-to-end against a real `.xlsx` file (Bank Balances
-  template), including a deliberately invalid currency, an unknown
-  account, and a duplicate row — all correctly flagged and excluded from
-  import, with only the valid row actually landing in the database.
-- FX rate import via Excel confirmed to create a new `FXRate` version
-  rather than overwrite the prior one, same as the original FXRate API path.
-- The forecast engine's full lifecycle was exercised live: create →
-  calculate → publish → recalculation-on-published correctly rejected →
-  roll-forward creates a linked next version → what-if creates a separate
-  scratch forecast and returns a week-by-week comparison without touching
-  the base. The demo dataset's currency view was confirmed to show a
-  genuine NGN liquidity gap (weeks 3-7) underneath a healthy
-  USD-consolidated figure — proving the "don't hide a currency shortfall"
-  requirement actually holds, not just in theory.
-
 ## Seeding data
 
-Four seed scripts, run from `backend/` with the venv active, in order:
+Run from `backend/` with the venv active, in order:
 
 ```bash
-python -m app.db.seed_reference_data     # account types, cash event types,
-                                           # common currencies, Excel template
-                                           # registry rows - required for the
-                                           # app to be useful at all
+python -m app.db.seed_reference_data     # account types, cash event types
+                                           # (including investment placement/
+                                           # termination/maturity/rollover
+                                           # codes), currencies, Excel
+                                           # template registry rows
 python -m app.db.seed_forecast_categories # default cash-flow category hierarchy
-python -m app.db.seed_demo_data           # DEMO DATA: 2 entities, 2 banks,
-                                           # 3 accounts, transactions, expected
-                                           # flows, and 2 demo users - optional,
-                                           # for trying the app out
+python -m app.db.seed_facility_types      # configurable facility type lookup
+python -m app.db.seed_investment_types    # configurable investment type
+                                           # lookup (Fixed Deposit implemented;
+                                           # other types seeded as inert rows)
+python -m app.db.seed_demo_data           # DEMO DATA: entities, banks,
+                                           # accounts, transactions, and demo
+                                           # users - optional
 python -m app.db.seed_forecast_demo_data  # DEMO DATA: liquidity thresholds,
-                                           # recurring payroll/opex, a 13-week
-                                           # spread with a deliberate deficit
-                                           # and recovery, and a calculated
-                                           # demo forecast - optional
+                                           # recurring flows, a demo forecast
+                                           # - optional
 ```
 
 Demo users created by `seed_demo_data`:
@@ -200,11 +257,14 @@ tagged `source_type="DEMO_DATA"` — never presented as real financial data.
 
 ## What's NOT implemented yet
 
-Payments, bank reconciliation, intercompany reconciliation, investments,
-loans/facilities, working capital, KPIs, reports, tasks/workflow, and the
-AI Treasury Copilot are all out of scope through Stage 2, per the build
-instructions. See `DEVELOPMENT_ROADMAP.md` for the planned build order —
-Funding & Credit Facilities is next.
+Bank reconciliation, intercompany reconciliation, working capital, KPIs/
+reports beyond what's listed in each stage's own doc, tasks/workflow, and
+the AI Treasury Copilot are out of scope — see `DEVELOPMENT_ROADMAP.md`
+for the planned build order. Stage 5 (Bank Reconciliation) is next and
+has not been started. Each completed stage's own `docs/STAGE_N_*.md`
+lists that stage's specific known limitations in detail (e.g. no
+automatic periodic-interest schedule generator for investments yet, no
+automated covenant-vs-forecast projection for facilities yet).
 
 ## Remaining setup you'll need to do yourself
 

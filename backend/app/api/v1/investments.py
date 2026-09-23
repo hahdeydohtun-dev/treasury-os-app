@@ -31,6 +31,7 @@ from app.schemas.investment import (
     InvestmentTypeOut,
     InvestmentUpdate,
     InvestmentVersionOut,
+    MaturitySettlementRequest,
     PlacementRequest,
     RebookingRequest,
     RolloverComparisonOut,
@@ -41,6 +42,7 @@ from app.schemas.investment import (
     TerminationResultOut,
 )
 from app.services.audit_service import record_audit_event
+from app.services.cash_position_service import calculate_operational_available_cash
 from app.services.investment_engine import calculate_simple_interest, compare_rollover_options
 from app.services.investment_service import (
     apply_investment_update,
@@ -49,6 +51,7 @@ from app.services.investment_service import (
     rebook_investment,
     record_initial_version,
     rollover_investment,
+    settle_maturity,
     terminate_investment,
     transition_investment_status,
 )
@@ -213,10 +216,16 @@ async def place_investment_endpoint(
     user: User = Depends(get_current_user),
 ) -> Investment:
     """
-    SECTION 11/12/39: row-locks the investment (idempotency - a
+    SECTION 2/11/12/39: row-locks the investment (idempotency - a
     concurrent second placement call serializes here, then sees the
     already-placed status/existing PLACEMENT transaction and is
-    rejected) and validates before mutating.
+    rejected) and validates before mutating. Available cash is
+    determined AUTHORITATIVELY from the existing cash-position
+    architecture (app/services/cash_position_service.py, itself built on
+    BankBalance - the same source every other cash figure in this
+    application uses) - a client-supplied `available_cash` is accepted
+    only for display/testing and is NEVER the basis for the accept/
+    reject decision.
     """
     investment = await load_investment_for_update(db, investment_id)
     if investment is None:
@@ -227,11 +236,24 @@ async def place_investment_endpoint(
     investment.value_date = payload.value_date or payload.placement_date
 
     source_entity_id = None
+    authoritative_available_cash = None
     if investment.source_account_id is not None:
         account = await db.get(BankAccount, investment.source_account_id)
-        source_entity_id = account.legal_entity_id if account else None
+        if account is None:
+            raise HTTPException(status_code=400, detail="Source account not found.")
+        source_entity_id = account.legal_entity_id
+        # SECTION 12: currency integrity - never silently convert.
+        if account.currency_code != investment.currency_code:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Source account currency {account.currency_code} does not match the "
+                       f"investment's currency {investment.currency_code}. Treasury OS does not "
+                       "support an implicit FX conversion for this flow.",
+            )
+        capacity = await calculate_operational_available_cash(db, bank_account_id=account.id)
+        authoritative_available_cash = capacity.operational_available_cash
 
-    reasons = validate_placement(investment, source_entity_id, payload.available_cash)
+    reasons = validate_placement(investment, source_entity_id, authoritative_available_cash)
     if reasons:
         raise HTTPException(status_code=400, detail={"validation_errors": reasons})
 
@@ -283,8 +305,24 @@ async def terminate_investment_endpoint(
     if reasons:
         raise HTTPException(status_code=409, detail={"validation_errors": reasons})
 
+    if payload.destination_account_id is not None:
+        account = await db.get(BankAccount, payload.destination_account_id)
+        if account is None:
+            raise HTTPException(status_code=400, detail="Destination account not found.")
+        if account.legal_entity_id != investment.legal_entity_id:
+            raise HTTPException(
+                status_code=400, detail="Destination account does not belong to this investment's entity.",
+            )
+        if account.currency_code != investment.currency_code:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Destination account currency {account.currency_code} does not match the "
+                       f"investment's currency {investment.currency_code}.",
+            )
+
     _transaction, result = await terminate_investment(
         db, investment, payload.amount, payload.termination_date, user.id,
+        destination_account_id=payload.destination_account_id,
     )
     await record_audit_event(
         db, module=MODULE.value, action="TERMINATE", record_type="Investment",
@@ -298,6 +336,63 @@ async def terminate_investment_endpoint(
         interest_forfeited=result.interest_forfeited, penalty=result.penalty,
         net_proceeds=result.net_proceeds, investment=InvestmentOut.model_validate(investment),
     )
+
+
+@router.post("/investments/{investment_id}/settle-maturity", response_model=InvestmentOut)
+async def settle_maturity_endpoint(
+    investment_id: uuid.UUID, payload: MaturitySettlementRequest, db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> Investment:
+    """
+    SECTION 4: an explicit, deliberate settlement action - the maturity
+    date passing never automatically creates this. Idempotent: a second
+    settlement attempt sees the already-existing MATURITY_SETTLEMENT
+    transaction (checked under the row lock) and is rejected (409).
+    """
+    investment = await load_investment_for_update(db, investment_id)
+    if investment is None:
+        raise HTTPException(status_code=404, detail="Investment not found")
+    await _assert_investment_scope(db, user, investment, TreasuryAction.EXECUTE)
+
+    if investment.status not in (InvestmentStatus.ACTIVE, InvestmentStatus.PARTIALLY_TERMINATED):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Investment must be ACTIVE or PARTIALLY_TERMINATED to settle at maturity "
+                   f"(current status: {investment.status.value}).",
+        )
+    if payload.settlement_date < investment.maturity_date:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Settlement date {payload.settlement_date} is before the investment's "
+                   f"maturity date {investment.maturity_date}.",
+        )
+
+    if payload.destination_account_id is not None:
+        account = await db.get(BankAccount, payload.destination_account_id)
+        if account is None:
+            raise HTTPException(status_code=400, detail="Destination account not found.")
+        if account.legal_entity_id != investment.legal_entity_id:
+            raise HTTPException(
+                status_code=400, detail="Destination account does not belong to this investment's entity.",
+            )
+        if account.currency_code != investment.currency_code:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Destination account currency {account.currency_code} does not match the "
+                       f"investment's currency {investment.currency_code}.",
+            )
+
+    await settle_maturity(
+        db, investment, payload.settlement_date, user.id,
+        destination_account_id=payload.destination_account_id, actual_interest=payload.actual_interest,
+    )
+    await record_audit_event(
+        db, module=MODULE.value, action="SETTLE_MATURITY", record_type="Investment",
+        record_id=str(investment.id), user_id=user.id, legal_entity_id=investment.legal_entity_id,
+    )
+    await db.commit()
+    await db.refresh(investment)
+    return investment
 
 
 @router.post("/investments/{investment_id}/rollover", response_model=InvestmentOut, status_code=201)
@@ -355,11 +450,35 @@ async def rebook_investment_endpoint(
     if investment.status not in (InvestmentStatus.ACTIVE, InvestmentStatus.PARTIALLY_TERMINATED):
         raise HTTPException(status_code=400, detail=f"Cannot rebook an investment in status {investment.status.value}.")
 
+    if payload.additional_principal and payload.additional_principal > 0:
+        account_id = payload.bank_account_id or investment.source_account_id
+        if account_id is not None:
+            account = await db.get(BankAccount, account_id)
+            if account is None:
+                raise HTTPException(status_code=400, detail="Funding account not found.")
+            if account.legal_entity_id != investment.legal_entity_id:
+                raise HTTPException(
+                    status_code=400, detail="Funding account does not belong to this investment's entity.",
+                )
+            if account.currency_code != investment.currency_code:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Funding account currency {account.currency_code} does not match the "
+                           f"investment's currency {investment.currency_code}.",
+                )
+            capacity = await calculate_operational_available_cash(db, bank_account_id=account.id)
+            if payload.additional_principal > capacity.operational_available_cash:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Additional principal {payload.additional_principal} exceeds available cash "
+                           f"{capacity.operational_available_cash} in the funding account.",
+                )
+
     investment = await rebook_investment(
         db, investment, payload.new_rate, payload.new_maturity_date, payload.additional_principal,
-        payload.reason, user.id,
+        payload.reason, user.id, bank_account_id=payload.bank_account_id,
+        idempotency_key=payload.idempotency_key,
     )
-    investment.expected_interest = _expected_interest(investment)
     await record_audit_event(
         db, module=MODULE.value, action="REBOOK", record_type="Investment",
         record_id=str(investment.id), user_id=user.id, legal_entity_id=investment.legal_entity_id,

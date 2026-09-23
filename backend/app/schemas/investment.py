@@ -106,6 +106,13 @@ class PlacementRequest(BaseModel):
 class TerminationRequest(BaseModel):
     amount: Decimal
     termination_date: datetime.date
+    destination_account_id: uuid.UUID | None = None
+
+
+class MaturitySettlementRequest(BaseModel):
+    settlement_date: datetime.date
+    destination_account_id: uuid.UUID | None = None
+    actual_interest: Decimal | None = None
 
 
 class TerminationResultOut(BaseModel):
@@ -130,6 +137,8 @@ class RebookingRequest(BaseModel):
     new_maturity_date: datetime.date | None = None
     additional_principal: Decimal = Decimal(0)
     reason: str
+    bank_account_id: uuid.UUID | None = None
+    idempotency_key: str | None = None
 
 
 class RolloverComparisonRequest(BaseModel):

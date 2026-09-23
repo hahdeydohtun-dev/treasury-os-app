@@ -159,3 +159,68 @@ def compare_rollover_options(
         withdrawn_principal=withdrawn, expected_interest_current_term=expected_current,
         expected_interest_new_term=expected_new, penalty=penalty, net_expected_proceeds=net_proceeds,
     )
+
+
+_PERIODIC_FREQUENCY_MONTHS = {
+    "MONTHLY": 1,
+    "QUARTERLY": 3,
+    "SEMI_ANNUAL": 6,
+    "ANNUAL": 12,
+}
+
+
+def _add_months(d: datetime.date, months: int) -> datetime.date:
+    import calendar
+
+    month_index = d.month - 1 + months
+    year = d.year + month_index // 12
+    month = month_index % 12 + 1
+    day = min(d.day, calendar.monthrange(year, month)[1])
+    return datetime.date(year, month, day)
+
+
+@dataclass
+class PeriodicInterestScheduleEntry:
+    period: int
+    period_start: datetime.date
+    period_end: datetime.date
+    interest_amount: Decimal
+
+
+def generate_periodic_interest_schedule(
+    principal: Decimal, annual_rate_pct: Decimal, start_date: datetime.date,
+    maturity_date: datetime.date, frequency, convention: DayCountConvention,
+) -> list:
+    """
+    SECTION 6 (Stage 4 final financial-integrity patch): deterministic
+    payment dates for MONTHLY/QUARTERLY/SEMI_ANNUAL/ANNUAL - start_date
+    -> each period boundary -> maturity_date, the last period always
+    truncated exactly at maturity_date so nothing is double-counted or
+    silently dropped as a stub period. Each period's interest uses
+    calculate_simple_interest on that period's own day-count fraction -
+    the same pure, reproducible math as everywhere else in this module.
+
+    CUSTOM frequency has no stored explicit dates on the Investment model
+    to build a schedule from - this deliberately returns an empty list
+    rather than guessing a schedule (documented limitation, not a silent
+    approximation).
+    """
+    frequency_value = frequency.value if hasattr(frequency, "value") else frequency
+    months = _PERIODIC_FREQUENCY_MONTHS.get(frequency_value)
+    if months is None or start_date >= maturity_date:
+        return []
+
+    schedule: list = []
+    period_start = start_date
+    period = 1
+    while period_start < maturity_date:
+        period_end = _add_months(period_start, months)
+        period_end = min(maturity_date, period_end)
+        interest = calculate_simple_interest(principal, annual_rate_pct, period_start, period_end, convention)
+        schedule.append(PeriodicInterestScheduleEntry(period, period_start, period_end, interest))
+        if period_end >= maturity_date:
+            break
+        period_start = period_end
+        period += 1
+
+    return schedule
