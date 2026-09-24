@@ -89,9 +89,6 @@ from app.models.investment import (  # noqa: F401
     InvestmentVersion,
     PenaltyType,
 )
-from app.models.investment import (
-    DayCountConvention as InvestmentDayCountConvention,
-)
 from app.models.lookup import AccountType, CashDirection, CashEventType  # noqa: F401
 from app.models.rbac import (  # noqa: F401
     EntityScopeType,

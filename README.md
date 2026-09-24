@@ -262,9 +262,16 @@ reports beyond what's listed in each stage's own doc, tasks/workflow, and
 the AI Treasury Copilot are out of scope — see `DEVELOPMENT_ROADMAP.md`
 for the planned build order. Stage 5 (Bank Reconciliation) is next and
 has not been started. Each completed stage's own `docs/STAGE_N_*.md`
-lists that stage's specific known limitations in detail (e.g. no
-automatic periodic-interest schedule generator for investments yet, no
-automated covenant-vs-forecast projection for facilities yet).
+lists that stage's specific known limitations in detail (e.g. investment
+periodic-interest forecast SCHEDULES are implemented for MONTHLY/
+QUARTERLY/SEMI_ANNUAL/ANNUAL frequencies — real payment dates, not a
+lump sum at maturity — but actual periodic interest TRANSACTIONS are not
+automatically posted on those dates; a treasury user or Excel import
+still records each actual receipt through the existing transaction/
+import workflow; CUSTOM frequency remains unsupported because no
+explicit custom payment dates are stored; and actual bank-to-investment
+receipt reconciliation remains a future capability, not built here — no
+automated covenant-vs-forecast projection for facilities yet either).
 
 ## Remaining setup you'll need to do yourself
 
