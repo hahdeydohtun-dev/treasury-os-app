@@ -23,6 +23,10 @@ from app.schemas.excel_hub import (
     ImportConfirmResult,
 )
 from app.services.audit_service import record_audit_event
+from app.services.bank_statement_service import (
+    annotate_statement_period_overlap,
+    load_import_batch_for_update,
+)
 from app.services.excel_service import (
     TemplateNotFoundError,
     TemplateVersionError,
@@ -91,6 +95,10 @@ async def upload_excel_file(
     except TemplateVersionError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
+    # Stage 5A, SECTION 13: additive, informational-only overlap check -
+    # never modifies the generic engine's own validation/status logic.
+    await annotate_statement_period_overlap(db, batch)
+
     await record_audit_event(
         db, module=TreasuryModule.EXCEL_DATA_HUB.value, action="UPLOAD",
         record_type="ImportBatch", record_id=str(batch.id), user_id=user.id,
@@ -141,7 +149,7 @@ async def confirm_import_batch(
     USER CONFIRMS IMPORT -> IMPORT TO POSTGRESQL -> IMPORT SUMMARY. A user
     without Import permission for the batch's entity cannot confirm it.
     """
-    batch = await db.get(ImportBatch, batch_id)
+    batch = await load_import_batch_for_update(db, batch_id)
     if batch is None:
         raise HTTPException(status_code=404, detail="Import batch not found")
 

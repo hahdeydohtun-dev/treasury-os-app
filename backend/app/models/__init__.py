@@ -72,6 +72,11 @@ from app.models.forecast import (  # noqa: F401
     RecurringFrequency,
     WeekStatus,
 )
+from app.models.bank_statement import (  # noqa: F401
+    BankStatementEntryType,
+    BankStatementTransaction,
+    BankStatementTransactionStatus,
+)
 from app.models.investment import (  # noqa: F401
     INVESTMENT_STATUS_TRANSITIONS,
     InterestPaymentFrequency,

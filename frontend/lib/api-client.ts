@@ -239,6 +239,14 @@ export const api = {
   listFacilityTypes: (token: string) =>
     request<{ code: string; name: string }[]>("/facility-types", {}, token),
 
+  // --- Bank Statement Ingestion (Stage 5A) ---
+  listBankStatementTransactions: (token: string, params?: Record<string, string>) =>
+    request<BankStatementTransactionOut[]>(
+      `/bank-statements/transactions${params ? "?" + new URLSearchParams(params) : ""}`, {}, token
+    ),
+  getBankStatementTransaction: (token: string, id: string) =>
+    request<BankStatementTransactionOut>(`/bank-statements/transactions/${id}`, {}, token),
+
   // --- Investments & Fixed Deposit Management ---
   listInvestments: (token: string, params?: Record<string, string>) =>
     request<InvestmentOut[]>(`/investments${params ? "?" + new URLSearchParams(params) : ""}`, {}, token),
@@ -591,4 +599,28 @@ export interface InvestmentAlertOut {
   message: string;
   severity: string;
   due_date: string | null;
+}
+
+// --- Bank Statement Ingestion (Stage 5A) types ---
+export interface BankStatementTransactionOut {
+  id: string;
+  legal_entity_id: string;
+  bank_id: string;
+  bank_account_id: string;
+  statement_period_start: string;
+  statement_period_end: string;
+  transaction_date: string;
+  value_date: string | null;
+  posting_date: string | null;
+  entry_type: "DEBIT" | "CREDIT";
+  amount: string;
+  currency_code: string;
+  balance_after_transaction: string | null;
+  bank_reference: string | null;
+  external_transaction_id: string | null;
+  narration: string | null;
+  has_strong_identity: boolean;
+  status: string;
+  import_batch_id: string;
+  source_row_number: number;
 }

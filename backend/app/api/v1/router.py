@@ -4,6 +4,7 @@ from app.api.v1 import (
     audit,
     auth,
     bank_balances,
+    bank_statements,
     banking,
     cash_position,
     currencies,
@@ -29,6 +30,7 @@ api_router.include_router(transactions.router)
 api_router.include_router(forecast_inputs.router)
 api_router.include_router(cash_position.router)
 api_router.include_router(excel.router)
+api_router.include_router(bank_statements.router)
 api_router.include_router(forecast.router)
 api_router.include_router(facilities.router)
 api_router.include_router(funding.router)

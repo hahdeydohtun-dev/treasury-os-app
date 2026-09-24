@@ -258,8 +258,49 @@ limitations" section for full detail.
 
 ## Stage 5 — Bank Reconciliation
 
-- Reconciliation engine (exact + tolerance + narration matching) over
-  `TreasuryTransaction` rows sourced from Bank Transactions imports
+### Stage 5A — Bank Statement Ingestion & Normalization (delivered)
+
+A normalized, bank-agnostic `BankStatementTransaction` evidence layer,
+ingested through a new `BANK_STATEMENT` Excel Data Hub template with
+zero changes to the shared upload/validate/confirm engine. Deliberately
+NOT a second cash ledger — no effect on `TreasuryTransaction`,
+`BankBalance`, or operational available cash. See
+`docs/STAGE_5A_BANK_STATEMENT_INGESTION.md` for full detail.
+
+- [x] `BankStatementTransaction` model, clearly distinct from
+      `TreasuryTransaction`/`BankBalance`, with full source traceability
+      (import batch + source row number)
+- [x] Two-tier duplicate detection (exact vs. potential, backed by a
+      partial unique index for strong-identity rows only) — never
+      "same date + amount alone"
+- [x] Statement-period overlap detection (informational, never a hard
+      rejection — a reissued statement is not an automatic duplicate)
+- [x] A real, pre-existing concurrency gap in the shared Excel import
+      engine (`confirm_import` had no row lock) found and fixed — closes
+      it for every template's import confirmation, not only bank
+      statements, verified with genuine concurrent-request tests
+- [x] Full entity/group RBAC via the existing authorization module,
+      including a check that a row cannot reference another entity's
+      real bank account even when the file's own Entity column claims
+      otherwise
+- [x] Multi-currency preserved exactly, never converted/merged
+- [x] 43 new tests (model, full import lifecycle, duplicate detection,
+      period overlap, cross-entity/cross-group security, traceability,
+      multi-currency, idempotency, concurrency) — full suite (Stage 0-5A)
+      at 192/192
+
+Known limitations (all deliberately deferred): no matching/scoring
+(5C), no open items/workflow (5D/5E), no reconciliation reports (5F), no
+adaptive learning (5G). Corrected finding: Treasury OS has no
+Tasks/Workflow system yet (`TASKS_WORKFLOW` is an unbuilt Stage 0 RBAC
+placeholder, scheduled for Stage 7) — noted for future sub-stages that
+will need to account for this rather than assume it exists.
+
+### Stage 5B onward (not started)
+
+- Reconciliation data model, deterministic matching engine (exact +
+  tolerance + narration matching) over `TreasuryTransaction` rows against
+  the Stage 5A evidence layer
 - Open-items-first UI (matched transactions available via drill-down only)
 - Assignment/investigation/comment/resolution/approval/closure workflow
 

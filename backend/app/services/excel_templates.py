@@ -620,3 +620,10 @@ TEMPLATE_REGISTRY.update(FACILITY_TEMPLATE_REGISTRY)
 from app.services.investment_excel_templates import INVESTMENT_TEMPLATE_REGISTRY
 
 TEMPLATE_REGISTRY.update(INVESTMENT_TEMPLATE_REGISTRY)
+
+# Stage 5A: Bank Statement Ingestion & Normalization - external bank
+# evidence, merged into the same registry, same generic engine, no
+# separate ingestion pipeline. See bank_statement_excel_template.py.
+from app.services.bank_statement_excel_template import BANK_STATEMENT_TEMPLATE_REGISTRY
+
+TEMPLATE_REGISTRY.update(BANK_STATEMENT_TEMPLATE_REGISTRY)

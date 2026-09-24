@@ -13,6 +13,7 @@ export const NAV_ITEMS: NavItem[] = [
   { label: "Banks & Accounts", href: "/banks-accounts", enabled: true },
   { label: "Funding & Facilities", href: "/facilities", enabled: true },
   { label: "Payments", href: "/payments", enabled: false },
+  { label: "Bank Statements", href: "/bank-statements", enabled: true },
   { label: "Reconciliation", href: "/reconciliation", enabled: false },
   { label: "Intercompany", href: "/intercompany", enabled: false },
   { label: "Working Capital", href: "/working-capital", enabled: false },

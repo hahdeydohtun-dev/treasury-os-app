@@ -13,7 +13,8 @@ Multi-entity, multi-currency Treasury Management System.
 | Stage 3 — Funding & Credit Facilities | Complete |
 | Stage 3 Hardening — integrity / concurrency / idempotency / repository security | Complete |
 | Stage 4 — Investments & Fixed Deposit Management | Complete (including financial-integrity/cash-ledger hardening) |
-| Stage 5 — Bank Reconciliation | **Not Started** |
+| Stage 5A — Bank Statement Ingestion & Normalization | Complete |
+| Stage 5B onward — Matching, Open Items, Reports, Adaptive Learning | **Not Started** |
 
 See `DEVELOPMENT_ROADMAP.md` for the full build history and what's planned
 next, and `docs/` for a per-stage architecture doc and implementation
@@ -161,10 +162,10 @@ Run tests:
 pytest -q
 ```
 
-158 tests across Stage 0-4 (facilities, funding actions, forecast
-engine, security/RBAC hardening, Excel Data Hub, investments, and the
-Stage 3/4 financial-integrity/concurrency hardening passes) - all
-passing as of this stage.
+192 tests across Stage 0-5A (facilities, funding actions, forecast
+engine, security/RBAC hardening, Excel Data Hub, investments, Stage
+3/4 financial-integrity/concurrency hardening passes, and bank
+statement ingestion) - all passing as of this stage.
 
 ## 3. Frontend setup
 
@@ -257,11 +258,17 @@ tagged `source_type="DEMO_DATA"` — never presented as real financial data.
 
 ## What's NOT implemented yet
 
-Bank reconciliation, intercompany reconciliation, working capital, KPIs/
-reports beyond what's listed in each stage's own doc, tasks/workflow, and
-the AI Treasury Copilot are out of scope — see `DEVELOPMENT_ROADMAP.md`
-for the planned build order. Stage 5 (Bank Reconciliation) is next and
-has not been started. Each completed stage's own `docs/STAGE_N_*.md`
+Bank reconciliation MATCHING (candidate generation, scoring, open items,
+reports, adaptive learning), intercompany reconciliation, working
+capital, KPIs/reports beyond what's listed in each stage's own doc,
+tasks/workflow, and the AI Treasury Copilot are out of scope — see
+`DEVELOPMENT_ROADMAP.md` for the planned build order. Stage 5A (Bank
+Statement Ingestion & Normalization) is complete — a clean, normalized,
+auditable bank-statement evidence layer now exists (see
+`docs/STAGE_5A_BANK_STATEMENT_INGESTION.md`), but nothing yet reads that
+evidence to actually reconcile it against `TreasuryTransaction`; that is
+Stage 5B onward, not started. Each completed stage's own
+`docs/STAGE_N_*.md`
 lists that stage's specific known limitations in detail (e.g. investment
 periodic-interest forecast SCHEDULES are implemented for MONTHLY/
 QUARTERLY/SEMI_ANNUAL/ANNUAL frequencies — real payment dates, not a
