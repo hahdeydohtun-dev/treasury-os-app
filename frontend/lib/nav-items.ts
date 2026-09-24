@@ -14,7 +14,7 @@ export const NAV_ITEMS: NavItem[] = [
   { label: "Funding & Facilities", href: "/facilities", enabled: true },
   { label: "Payments", href: "/payments", enabled: false },
   { label: "Bank Statements", href: "/bank-statements", enabled: true },
-  { label: "Reconciliation", href: "/reconciliation", enabled: false },
+  { label: "Reconciliation", href: "/reconciliation", enabled: true },
   { label: "Intercompany", href: "/intercompany", enabled: false },
   { label: "Working Capital", href: "/working-capital", enabled: false },
   { label: "Investments", href: "/investments", enabled: true },

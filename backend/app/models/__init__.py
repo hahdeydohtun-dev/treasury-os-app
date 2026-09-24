@@ -77,6 +77,18 @@ from app.models.bank_statement import (  # noqa: F401
     BankStatementTransaction,
     BankStatementTransactionStatus,
 )
+from app.models.reconciliation import (  # noqa: F401
+    RECONCILIATION_RUN_STATUS_TRANSITIONS,
+    MatchSuggestionStatus,
+    MatchType,
+    OpenItemCategory,
+    OpenItemStatus,
+    ReconciliationConfiguration,
+    ReconciliationMatchSuggestion,
+    ReconciliationOpenItem,
+    ReconciliationRun,
+    ReconciliationRunStatus,
+)
 from app.models.investment import (  # noqa: F401
     INVESTMENT_STATUS_TRANSITIONS,
     InterestPaymentFrequency,

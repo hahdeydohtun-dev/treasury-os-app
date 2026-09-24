@@ -247,6 +247,30 @@ export const api = {
   getBankStatementTransaction: (token: string, id: string) =>
     request<BankStatementTransactionOut>(`/bank-statements/transactions/${id}`, {}, token),
 
+  // --- Reconciliation Data Model (Stage 5B) ---
+  listReconciliationRuns: (token: string, params?: Record<string, string>) =>
+    request<ReconciliationRunOut[]>(
+      `/reconciliation/runs${params ? "?" + new URLSearchParams(params) : ""}`, {}, token
+    ),
+  getReconciliationRun: (token: string, id: string) =>
+    request<ReconciliationRunOut>(`/reconciliation/runs/${id}`, {}, token),
+  createReconciliationRun: (token: string, payload: Record<string, unknown>) =>
+    request<ReconciliationRunOut>("/reconciliation/runs", {
+      method: "POST", body: JSON.stringify(payload),
+    }, token),
+  executeReconciliationRun: (token: string, id: string) =>
+    request<ReconciliationRunOut>(`/reconciliation/runs/${id}/execute`, { method: "POST" }, token),
+  cancelReconciliationRun: (token: string, id: string) =>
+    request<ReconciliationRunOut>(`/reconciliation/runs/${id}/cancel`, { method: "POST" }, token),
+  listReconciliationConfigurations: (token: string, params?: Record<string, string>) =>
+    request<ReconciliationConfigurationOut[]>(
+      `/reconciliation/configurations${params ? "?" + new URLSearchParams(params) : ""}`, {}, token
+    ),
+  createReconciliationConfiguration: (token: string, payload: Record<string, unknown>) =>
+    request<ReconciliationConfigurationOut>("/reconciliation/configurations", {
+      method: "POST", body: JSON.stringify(payload),
+    }, token),
+
   // --- Investments & Fixed Deposit Management ---
   listInvestments: (token: string, params?: Record<string, string>) =>
     request<InvestmentOut[]>(`/investments${params ? "?" + new URLSearchParams(params) : ""}`, {}, token),
@@ -623,4 +647,38 @@ export interface BankStatementTransactionOut {
   status: string;
   import_batch_id: string;
   source_row_number: number;
+}
+
+// --- Reconciliation Data Model (Stage 5B) types ---
+export interface ReconciliationRunOut {
+  id: string;
+  legal_entity_id: string;
+  bank_account_id: string;
+  period_start: string;
+  period_end: string;
+  status: "DRAFT" | "READY" | "RUNNING" | "COMPLETED" | "FAILED" | "CANCELLED";
+  configuration_id: string | null;
+  statement_transaction_count: number;
+  eligible_transaction_count: number;
+  notes: string | null;
+  failure_reason: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+}
+
+export interface ReconciliationConfigurationOut {
+  id: string;
+  legal_entity_id: string | null;
+  bank_account_id: string | null;
+  currency_code: string | null;
+  amount_tolerance_pct: string;
+  date_tolerance_days: number;
+  high_value_threshold: string | null;
+  duplicate_policy: string | null;
+  matching_rule_config: Record<string, unknown>;
+  is_active: boolean;
+  version: number;
+  is_current: boolean;
+  superseded_by_id: string | null;
+  effective_from: string;
 }

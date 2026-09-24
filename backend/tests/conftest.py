@@ -48,6 +48,8 @@ async def _clean_database(_reset_engine_pool: None) -> AsyncGenerator[None, None
             text(
                 "TRUNCATE TABLE audit_events, import_issues, import_batches, "
                 "bank_statement_transactions, "
+                "reconciliation_open_items, reconciliation_match_suggestions, "
+                "reconciliation_runs, reconciliation_configurations, "
                 "forecast_alerts, forecast_lines, forecast_weeks, forecast_adjustments, "
                 "forecast_scenario_assumptions, forecasts, recurring_cash_flows, "
                 "liquidity_thresholds, "

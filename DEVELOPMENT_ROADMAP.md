@@ -296,11 +296,49 @@ Tasks/Workflow system yet (`TASKS_WORKFLOW` is an unbuilt Stage 0 RBAC
 placeholder, scheduled for Stage 7) — noted for future sub-stages that
 will need to account for this rather than assume it exists.
 
-### Stage 5B onward (not started)
+### Stage 5B — Reconciliation Data Model (delivered)
 
-- Reconciliation data model, deterministic matching engine (exact +
-  tolerance + narration matching) over `TreasuryTransaction` rows against
-  the Stage 5A evidence layer
+The secure, auditable persistence foundation for reconciliation —
+`ReconciliationRun`, `ReconciliationMatchSuggestion`,
+`ReconciliationOpenItem`, `ReconciliationConfiguration` — with a
+strictly separate run-creation vs. row-locked execution boundary. No
+matching, scoring, or open-item workflow logic exists yet; execution
+only counts in-scope bank statement evidence. See
+`docs/STAGE_5B_RECONCILIATION_DATA_MODEL.md` for full detail.
+
+- [x] `ReconciliationRun` scoped to exactly one entity + one bank
+      account (never group-wide), with an explicit status-transition
+      table mirroring `FACILITY_STATUS_TRANSITIONS`
+- [x] `ReconciliationConfiguration` follows `FXRate`'s own effective-dated
+      versioning discipline (version/is_current/superseded_by_id) — a
+      run's `configuration_id` reference stays reproducible forever,
+      even after the configuration is later superseded
+- [x] Run creation and execution are strictly separate operations —
+      creation never creates a suggestion or open item; execution only
+      counts in-scope `BankStatementTransaction` rows and transitions
+      status, verified to create zero cash-ledger side effects
+- [x] Row-locked execution boundary (`SELECT ... FOR UPDATE`), verified
+      with a genuine concurrent-request test — exactly one of two
+      simultaneous executions succeeds
+- [x] Full entity/group RBAC via the existing authorization module — zero
+      new RBAC enum values needed (CREATE/VIEW/EDIT/EXECUTE/CLOSE/
+      CONFIGURE all already existed)
+- [x] 17 new tests (creation validation, cross-entity bank account
+      rejection, full lifecycle, in-scope-only counting, non-ready
+      execution rejection, zero side effects, configuration versioning,
+      cross-entity/cross-group security, concurrency) — full suite
+      (Stage 0-5B) at 209/209
+- [x] Found and fixed a genuine timezone-column bug during testing
+      (`started_at`/`completed_at`/`resolved_at` needed
+      `DateTime(timezone=True)`) via a proper follow-up migration
+
+### Stage 5C onward (not started)
+
+- Deterministic matching engine (exact + tolerance + narration matching)
+  over `TreasuryTransaction` rows against the Stage 5A evidence layer,
+  writing real `ReconciliationMatchSuggestion` rows (Stage 5C)
+- Advanced matching: one-to-many, many-to-one, batch payments, internal
+  transfers, FX-aware matching (Stage 5D)
 - Open-items-first UI (matched transactions available via drill-down only)
 - Assignment/investigation/comment/resolution/approval/closure workflow
 
