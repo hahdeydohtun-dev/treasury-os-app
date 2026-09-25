@@ -15,7 +15,13 @@ Multi-entity, multi-currency Treasury Management System.
 | Stage 4 — Investments & Fixed Deposit Management | Complete (including financial-integrity/cash-ledger hardening) |
 | Stage 5A — Bank Statement Ingestion & Normalization | Complete |
 | Stage 5B — Reconciliation Data Model | Complete |
-| Stage 5C onward — Deterministic Matching, Advanced Matching, Open Items, Reports, Adaptive Learning | **Not Started** |
+| Stage 5C — Deterministic Bank Reconciliation Matching Engine | Complete |
+| Stage 5D — Advanced Matching (one-to-many, batch, internal transfer, FX) | **Not Started** |
+| Stage 5E — Open-Item Workflow | **Not Started** |
+| Stage 5F — Reconciliation Reports | **Not Started** |
+| Stage 5G — Adaptive Matching | **Not Started** |
+| Stage 5H — Full Reconciliation Frontend | **Not Started** |
+| Stage 5I — Final Hardening | **Not Started** |
 
 See `DEVELOPMENT_ROADMAP.md` for the full build history and what's planned
 next, and `docs/` for a per-stage architecture doc and implementation
@@ -163,11 +169,11 @@ Run tests:
 pytest -q
 ```
 
-209 tests across Stage 0-5B (facilities, funding actions, forecast
+243 tests across Stage 0-5C (facilities, funding actions, forecast
 engine, security/RBAC hardening, Excel Data Hub, investments, Stage
 3/4 financial-integrity/concurrency hardening passes, bank statement
-ingestion, and the reconciliation data model) - all passing as of this
-stage.
+ingestion, the reconciliation data model, and the deterministic
+matching engine) - all passing as of this stage.
 
 ## 3. Frontend setup
 
@@ -260,18 +266,25 @@ tagged `source_type="DEMO_DATA"` — never presented as real financial data.
 
 ## What's NOT implemented yet
 
-Bank reconciliation MATCHING (candidate generation, scoring, open items,
-reports, adaptive learning), intercompany reconciliation, working
+Bank reconciliation ADVANCED matching (one-to-many, many-to-one, batch
+payments, internal transfers, FX matching, adaptive learning), open-item
+workflow, reconciliation reports, intercompany reconciliation, working
 capital, KPIs/reports beyond what's listed in each stage's own doc,
 tasks/workflow, and the AI Treasury Copilot are out of scope — see
 `DEVELOPMENT_ROADMAP.md` for the planned build order. Stage 5A (Bank
-Statement Ingestion & Normalization) and Stage 5B (Reconciliation Data
+Statement Ingestion & Normalization), Stage 5B (Reconciliation Data
 Model — `ReconciliationRun`/`ReconciliationConfiguration`, run creation
-and a row-locked execution boundary that only counts in-scope evidence)
-are both complete — see `docs/STAGE_5A_BANK_STATEMENT_INGESTION.md` and
-`docs/STAGE_5B_RECONCILIATION_DATA_MODEL.md` — but nothing yet reads that
-evidence to actually reconcile it against `TreasuryTransaction`; that is
-Stage 5B onward, not started. Each completed stage's own
+and a row-locked execution boundary), and Stage 5C (a deterministic,
+one-to-one matching engine — candidate generation, fixed-point scoring,
+EXACT/TOLERANCE match types, ambiguous-tie handling that never
+arbitrarily picks a winner) are all complete — see
+`docs/STAGE_5A_BANK_STATEMENT_INGESTION.md`,
+`docs/STAGE_5B_RECONCILIATION_DATA_MODEL.md`, and
+`docs/STAGE_5C_DETERMINISTIC_MATCHING_ENGINE.md`. Executing a
+reconciliation run now produces real `ReconciliationMatchSuggestion`
+rows against `TreasuryTransaction`, but nothing yet turns those
+suggestions into a human workflow, a report, or a learned/adaptive
+process; that begins at Stage 5D. Each completed stage's own
 `docs/STAGE_N_*.md`
 lists that stage's specific known limitations in detail (e.g. investment
 periodic-interest forecast SCHEDULES are implemented for MONTHLY/

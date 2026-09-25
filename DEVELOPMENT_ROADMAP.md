@@ -332,11 +332,47 @@ only counts in-scope bank statement evidence. See
       (`started_at`/`completed_at`/`resolved_at` needed
       `DateTime(timezone=True)`) via a proper follow-up migration
 
-### Stage 5C onward (not started)
+### Stage 5C — Deterministic Bank Reconciliation Matching Engine (delivered)
 
-- Deterministic matching engine (exact + tolerance + narration matching)
-  over `TreasuryTransaction` rows against the Stage 5A evidence layer,
-  writing real `ReconciliationMatchSuggestion` rows (Stage 5C)
+A deterministic, one-to-one matching engine over `TreasuryTransaction`
+rows against the Stage 5A evidence layer, writing real
+`ReconciliationMatchSuggestion` rows. No AI, no adaptive learning, no
+one-to-many/many-to-one/batch/internal-transfer/FX matching — all
+explicitly deferred. See
+`docs/STAGE_5C_DETERMINISTIC_MATCHING_ENGINE.md` for full detail.
+
+- [x] Layered architecture (candidate generation / scoring /
+      orchestration kept separate, per the design Stage 5D will need to
+      extend without touching the other two layers)
+- [x] Database-side candidate generation only — entity/account/currency/
+      direction/date-window/amount-band all enforced as SQL predicates,
+      verified with a 51-row population narrowing to exactly 1 in-scope
+      candidate
+- [x] Fixed-point deterministic scoring (amount/reference/date/
+      direction/narration), `MatchType.EXACT`/`TOLERANCE` distinguished,
+      centralized thresholds, a versioned `matching_rule_version`
+      (`5C-1.0`) stored on every suggestion and on the run itself
+- [x] Ambiguous ties are never arbitrarily resolved — every tied
+      top-scoring candidate is persisted as its own suggestion
+- [x] Found and fixed a genuine idempotency bug during testing: a
+      repeated execution pass could see a shifted candidate population
+      (since a prior pass's match is now "claimed") and insert a
+      spurious second suggestion — fixed with an early per-bank-
+      transaction "already processed this run" guard
+- [x] Zero financial side effects — verified explicitly that a
+      `TreasuryTransaction`'s own fields and a `BankBalance`'s closing
+      balance are byte-for-byte unchanged after execution
+- [x] Full entity/account/currency isolation verified with identical-
+      looking transactions across each boundary producing zero
+      candidates, not merely a low score
+- [x] 43 new tests (basic signals, isolation, tie handling, determinism,
+      persistence, idempotency, concurrency, configuration-version
+      immutability, financial integrity, high-value conservative gating,
+      normalization units, candidate-generation performance) — full
+      suite (Stage 0-5C) at 243/243
+
+### Stage 5D onward (not started)
+
 - Advanced matching: one-to-many, many-to-one, batch payments, internal
   transfers, FX-aware matching (Stage 5D)
 - Open-items-first UI (matched transactions available via drill-down only)

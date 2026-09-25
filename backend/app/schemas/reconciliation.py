@@ -36,6 +36,12 @@ class ReconciliationRunOut(BaseModel):
     configuration_id: uuid.UUID | None
     statement_transaction_count: int
     eligible_transaction_count: int
+    candidate_count: int
+    suggestion_count: int
+    matched_count: int
+    ambiguous_count: int
+    unmatched_count: int
+    matching_rule_version: str | None
     notes: str | None
     failure_reason: str | None
     started_at: datetime.datetime | None
@@ -53,6 +59,7 @@ class ReconciliationMatchSuggestionOut(BaseModel):
     confidence: Decimal | None
     status: MatchSuggestionStatus
     reason: str | None
+    matching_rule_version: str | None
 
     model_config = {"from_attributes": True}
 

@@ -147,6 +147,9 @@ export default function ReconciliationPage() {
               <th style={{ padding: "6px 8px" }}>Period</th>
               <th style={{ padding: "6px 8px" }}>Status</th>
               <th style={{ padding: "6px 8px" }}>Statement Txns</th>
+              <th style={{ padding: "6px 8px" }}>Matched</th>
+              <th style={{ padding: "6px 8px" }}>Ambiguous</th>
+              <th style={{ padding: "6px 8px" }}>Unmatched</th>
               <th style={{ padding: "6px 8px" }}>Actions</th>
             </tr>
           </thead>
@@ -156,6 +159,9 @@ export default function ReconciliationPage() {
                 <td style={{ padding: "6px 8px" }}>{run.period_start} to {run.period_end}</td>
                 <td style={{ padding: "6px 8px" }}><StatusBadge status={run.status} /></td>
                 <td style={{ padding: "6px 8px" }}>{run.statement_transaction_count}</td>
+                <td style={{ padding: "6px 8px" }}>{run.matched_count}</td>
+                <td style={{ padding: "6px 8px" }}>{run.ambiguous_count}</td>
+                <td style={{ padding: "6px 8px" }}>{run.unmatched_count}</td>
                 <td style={{ padding: "6px 8px" }}>
                   {run.status === "READY" && (
                     <>
@@ -168,7 +174,7 @@ export default function ReconciliationPage() {
             ))}
             {runs.length === 0 && !loading && (
               <tr>
-                <td colSpan={4} style={{ padding: "12px 8px", color: "var(--color-text-muted)" }}>
+                <td colSpan={7} style={{ padding: "12px 8px", color: "var(--color-text-muted)" }}>
                   No reconciliation runs yet.
                 </td>
               </tr>

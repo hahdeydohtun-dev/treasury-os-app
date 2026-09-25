@@ -1,14 +1,14 @@
 """
-Reconciliation run + configuration service (Stage 5B).
+Reconciliation run + configuration service (Stage 5B/5C).
 
-Implements ONLY the run lifecycle and execution BOUNDARY described in
-the Stage 5B run-creation/execution-boundary addendum - never the
-matching algorithm itself (Stage 5C). `execute_reconciliation_run`
-below deliberately does nothing but count in-scope
-BankStatementTransaction rows and flip the run's own status; it never
-reads TreasuryTransaction for scoring purposes, never creates a
-ReconciliationMatchSuggestion or ReconciliationOpenItem row, and never
-touches any cash-affecting model.
+Stage 5B established ONLY the run lifecycle and execution BOUNDARY.
+Stage 5C extends `execute_reconciliation_run` to actually invoke the
+deterministic matching engine (reconciliation_matching_engine.py) over
+the run's own authorized scope - never broadened. This module itself
+still contains NO scoring/candidate-generation logic - that lives
+entirely in reconciliation_matching_engine.py/
+reconciliation_candidate_generation.py/reconciliation_scoring.py, kept
+separate per SECTION 34/35's layering requirement.
 """
 import datetime
 import uuid
@@ -25,6 +25,8 @@ from app.models.reconciliation import (
     ReconciliationRun,
     ReconciliationRunStatus,
 )
+from app.services.reconciliation_matching_engine import run_matching_for_run
+from app.services.reconciliation_scoring import MATCHING_RULE_VERSION
 
 
 async def load_run_for_update(db: AsyncSession, run_id: uuid.UUID) -> ReconciliationRun | None:
@@ -189,19 +191,20 @@ async def transition_run_status(
 
 async def execute_reconciliation_run(db: AsyncSession, run: ReconciliationRun, user_id) -> ReconciliationRun:
     """
-    SECTION 4-10 of the run-boundary addendum: the execution BOUNDARY
-    only. Transitions READY -> RUNNING -> COMPLETED (or FAILED on an
-    unexpected error), and populates result-count infrastructure by
-    counting BankStatementTransaction rows already within the run's own
-    authorized scope (entity + bank account + period) - the exact same
-    scope the run itself was created against, never broadened.
+    SECTION 4-10 of the run-boundary addendum, extended by Stage 5C
+    (SECTIONS 5-9, 30, 44, 45): the execution BOUNDARY that now actually
+    performs deterministic matching. Transitions READY -> RUNNING ->
+    COMPLETED (or FAILED on an unexpected error), counts
+    BankStatementTransaction rows already within the run's own
+    authorized scope, and then runs the deterministic matching engine
+    (reconciliation_matching_engine.py) over exactly that same scope -
+    never broadened, never touching another entity/account/currency.
 
-    This function creates ZERO ReconciliationMatchSuggestion rows and
-    ZERO ReconciliationOpenItem rows - there is no matching engine here
-    yet (Stage 5C). `eligible_transaction_count` is set equal to
-    `statement_transaction_count` as an explicit Stage 5B placeholder;
-    Stage 5C will define real eligibility rules (e.g. excluding rows
-    already consumed by an earlier run) and refine this.
+    Financial integrity (SECTION 30): this function creates ONLY
+    ReconciliationMatchSuggestion rows. It never creates, modifies, or
+    deletes a TreasuryTransaction, BankStatementTransaction, BankBalance,
+    or any cash-affecting record - the matching engine only READS
+    TreasuryTransaction/BankStatementTransaction.
     """
     await transition_run_status(db, run, ReconciliationRunStatus.RUNNING)
     run.started_at = datetime.datetime.now(datetime.UTC)
@@ -218,6 +221,21 @@ async def execute_reconciliation_run(db: AsyncSession, run: ReconciliationRun, u
         count = (await db.execute(count_stmt)).scalar_one()
         run.statement_transaction_count = count
         run.eligible_transaction_count = count
+
+        configuration = None
+        if run.configuration_id is not None:
+            configuration = await db.get(ReconciliationConfiguration, run.configuration_id)
+
+        matching_result = await run_matching_for_run(
+            db, run_id=run.id, legal_entity_id=run.legal_entity_id, bank_account_id=run.bank_account_id,
+            period_start=run.period_start, period_end=run.period_end, configuration=configuration,
+        )
+        run.candidate_count = matching_result.candidate_count
+        run.suggestion_count = matching_result.suggestion_count
+        run.matched_count = matching_result.matched_count
+        run.ambiguous_count = matching_result.ambiguous_count
+        run.unmatched_count = matching_result.unmatched_count
+        run.matching_rule_version = MATCHING_RULE_VERSION
 
         await transition_run_status(db, run, ReconciliationRunStatus.COMPLETED)
         run.completed_at = datetime.datetime.now(datetime.UTC)
