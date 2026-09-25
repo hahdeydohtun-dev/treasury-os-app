@@ -150,10 +150,67 @@ suggestion or open item** - verified by
 `test_run_creation_never_creates_suggestions_or_open_items`.
 
 Execution revalidates critical conditions at the API layer (not just at
-creation time): the bank account must still belong to the run's entity,
-and the run's own configuration (if any) must still exist and be
-active. Either failure moves the run straight to `FAILED` with a
-recorded reason rather than crashing the request.
+creation time): the bank account must still belong to the run's entity.
+The run's own referenced configuration is handled differently - see
+Section 6a below (Stage 5B configuration-integrity hardening patch) -
+execution never fails merely because that configuration is no longer
+current or active. Either a bank-account failure or a genuinely missing
+configuration moves the run straight to `FAILED` with a recorded reason
+rather than crashing the request.
+
+### 6a. Configuration integrity (hardening patch)
+
+Two corrections were made after the initial Stage 5B implementation,
+both preserving the architecture described above rather than changing
+it:
+
+**Explicit configuration scope validation** (`POST /reconciliation/runs`
+with a client-supplied `configuration_id`): existence and
+`is_current`/`is_active` alone were insufficient - a configuration's own
+scope must also be compatible with the requested run.
+`validate_configuration_scope` (`app/services/reconciliation_service.py`)
+checks each of the configuration's own scope fields that is actually set
+(non-null) against the run's corresponding value: a configuration whose
+`legal_entity_id` is set must match the run's entity; whose
+`bank_account_id` is set must match the run's account; whose
+`currency_code` is set must match the account's own currency. A null
+field on the configuration always matches (an entity-wide, account-wide,
+or fully-global configuration remains valid at every level it doesn't
+explicitly restrict) - this does not change
+`resolve_effective_configuration`'s own most-specific-first resolution
+hierarchy at all; it only adds a compatibility check for the case where
+the caller supplies the ID directly rather than letting it resolve
+automatically. RBAC is checked first, independent of and before this
+scope check, so a request for an unauthorized entity is always rejected
+with 403 regardless of whether the supplied configuration happens to
+match that entity's scope.
+
+**Historical configuration remains executable** (`POST
+/reconciliation/runs/{id}/execute`): the documented invariant is now
+also the enforced one -
+
+> `ReconciliationRun.configuration_id` identifies the exact
+> configuration version captured at run creation. Later configuration
+> versions may supersede that version without changing the run's
+> historical configuration. Execution uses the stored version and does
+> not automatically switch to the latest configuration.
+
+Concretely, execution fails only when the referenced configuration row
+cannot be loaded at all (`db.get(...)` returns `None`) - never merely
+because `is_current` or `is_active` is `False` on an otherwise-valid
+historical version. `create_configuration_version` was already correct
+in this respect (superseding a configuration only ever sets
+`is_current = False` on the prior row - `is_active` and every other
+field on that row are untouched, and the row itself is never deleted or
+mutated into the new version), so no change was needed there; the fix
+was entirely in the execution endpoint's own (overly strict) check.
+Because a `ReconciliationRun.configuration_id` is a real foreign key,
+the database itself already guarantees a run can never reference a
+configuration that has been deleted - a "cannot be loaded" execution
+failure is therefore a defensive code path (tested directly, since the
+FK makes it unreachable via the API without weakening schema integrity,
+which this patch deliberately does not do) rather than a state normal
+operation can produce.
 
 ## 7. Concurrency
 

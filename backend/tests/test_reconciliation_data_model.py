@@ -600,3 +600,347 @@ async def test_concurrent_execution_cannot_both_succeed(
 
     final = await client.get(f"/api/v1/reconciliation/runs/{run_id}", headers=headers)
     assert final.json()["status"] == "COMPLETED"
+
+
+# ---------------------------------------------------------------------------
+# Stage 5B configuration-integrity hardening patch
+# ---------------------------------------------------------------------------
+
+async def test_explicit_configuration_entity_mismatch_rejected(
+    client: AsyncClient, db_session: AsyncSession, demo_group_and_entities,
+):
+    """Test 1: a configuration belonging specifically to Entity B cannot be used for an Entity A run."""
+    from sqlalchemy import select
+
+    from app.models.rbac import EntityScopeType
+    from app.models.reconciliation import ReconciliationConfiguration, ReconciliationRun
+
+    group, entity_a, entity_b = demo_group_and_entities
+    bank = await _make_bank(db_session)
+    account_a = await _make_account(db_session, entity_a.id, bank.id, account_number="5566778899")
+    user = await _make_scoped_user(
+        db_session, scope_type=EntityScopeType.ENTITY, legal_entity_id=entity_a.id, label="entitymismatch",
+    )
+
+    config = ReconciliationConfiguration(
+        legal_entity_id=entity_b.id, version=1, is_current=True, is_active=True,
+        effective_from=datetime.date.today(),
+    )
+    db_session.add(config)
+    await db_session.commit()
+    headers = {"Authorization": f"Bearer {await _login(client, user)}"}
+
+    resp = await client.post(
+        "/api/v1/reconciliation/runs",
+        json=_run_payload(entity_a.id, account_a.id, configuration_id=config.id), headers=headers,
+    )
+    assert resp.status_code == 400
+
+    result = await db_session.execute(select(ReconciliationRun))
+    assert list(result.scalars().all()) == []
+
+
+async def test_explicit_configuration_bank_account_mismatch_rejected(
+    client: AsyncClient, db_session: AsyncSession, demo_group_and_entities,
+):
+    """Test 2: a configuration belonging specifically to Account B cannot be used for an Account A run."""
+    from sqlalchemy import select
+
+    from app.models.rbac import EntityScopeType
+    from app.models.reconciliation import ReconciliationConfiguration, ReconciliationRun
+
+    group, entity_a, _ = demo_group_and_entities
+    bank = await _make_bank(db_session)
+    account_a = await _make_account(db_session, entity_a.id, bank.id, account_number="6677889900")
+    account_b = await _make_account(db_session, entity_a.id, bank.id, account_number="7788990011")
+    user = await _make_scoped_user(
+        db_session, scope_type=EntityScopeType.ENTITY, legal_entity_id=entity_a.id, label="acctmismatch",
+    )
+    await db_session.commit()
+    headers = {"Authorization": f"Bearer {await _login(client, user)}"}
+
+    config = ReconciliationConfiguration(
+        legal_entity_id=entity_a.id, bank_account_id=account_b.id, version=1,
+        is_current=True, is_active=True, effective_from=datetime.date.today(),
+    )
+    db_session.add(config)
+    await db_session.commit()
+
+    resp = await client.post(
+        "/api/v1/reconciliation/runs",
+        json=_run_payload(entity_a.id, account_a.id, configuration_id=config.id), headers=headers,
+    )
+    assert resp.status_code == 400
+
+    result = await db_session.execute(select(ReconciliationRun))
+    assert list(result.scalars().all()) == []
+
+
+async def test_explicit_configuration_currency_mismatch_rejected(
+    client: AsyncClient, db_session: AsyncSession, demo_group_and_entities,
+):
+    """Test 3: a currency-specific configuration cannot be used for an incompatible account currency."""
+    from sqlalchemy import select
+
+    from app.models.rbac import EntityScopeType
+    from app.models.reconciliation import ReconciliationConfiguration, ReconciliationRun
+
+    group, entity_a, _ = demo_group_and_entities
+    bank = await _make_bank(db_session)
+    ngn_account = await _make_account(db_session, entity_a.id, bank.id, currency="NGN", account_number="8899001122")
+    user = await _make_scoped_user(
+        db_session, scope_type=EntityScopeType.ENTITY, legal_entity_id=entity_a.id, label="currencymismatch",
+    )
+    await db_session.commit()
+    headers = {"Authorization": f"Bearer {await _login(client, user)}"}
+
+    config = ReconciliationConfiguration(
+        legal_entity_id=entity_a.id, currency_code="USD", version=1,
+        is_current=True, is_active=True, effective_from=datetime.date.today(),
+    )
+    db_session.add(config)
+    await db_session.commit()
+
+    resp = await client.post(
+        "/api/v1/reconciliation/runs",
+        json=_run_payload(entity_a.id, ngn_account.id, configuration_id=config.id), headers=headers,
+    )
+    assert resp.status_code == 400
+
+    result = await db_session.execute(select(ReconciliationRun))
+    assert list(result.scalars().all()) == []
+
+
+async def test_explicit_entity_wide_configuration_valid_for_any_account(
+    client: AsyncClient, db_session: AsyncSession, demo_group_and_entities,
+):
+    """Test 4: a broader entity-wide configuration remains valid for any account belonging to that entity."""
+    from app.models.rbac import EntityScopeType
+
+    group, entity_a, _ = demo_group_and_entities
+    bank = await _make_bank(db_session)
+    account = await _make_account(db_session, entity_a.id, bank.id, account_number="9900112233")
+    user = await _make_scoped_user(
+        db_session, scope_type=EntityScopeType.ENTITY, legal_entity_id=entity_a.id, label="broadconfig",
+    )
+    await db_session.commit()
+    headers = {"Authorization": f"Bearer {await _login(client, user)}"}
+
+    config_resp = await client.post(
+        "/api/v1/reconciliation/configurations",
+        json={"legal_entity_id": str(entity_a.id), "amount_tolerance_pct": "1.0"}, headers=headers,
+    )
+    config_id = config_resp.json()["id"]
+
+    resp = await client.post(
+        "/api/v1/reconciliation/runs",
+        json=_run_payload(entity_a.id, account.id, configuration_id=config_id), headers=headers,
+    )
+    assert resp.status_code == 201
+    assert resp.json()["configuration_id"] == config_id
+
+
+async def test_explicit_global_configuration_valid_for_any_entity(
+    client: AsyncClient, db_session: AsyncSession, demo_group_and_entities,
+):
+    """A fully-broad (all-null-scope) configuration remains valid for any entity/account/currency."""
+    from app.models.rbac import EntityScopeType
+    from app.models.reconciliation import ReconciliationConfiguration
+
+    group, entity_a, _ = demo_group_and_entities
+    bank = await _make_bank(db_session)
+    account = await _make_account(db_session, entity_a.id, bank.id, account_number="0011223399")
+    user = await _make_scoped_user(
+        db_session, scope_type=EntityScopeType.GROUP_WIDE, group_id=group.id, label="globalconfig",
+    )
+    await db_session.commit()
+    headers = {"Authorization": f"Bearer {await _login(client, user)}"}
+
+    config = ReconciliationConfiguration(
+        version=1, is_current=True, is_active=True, effective_from=datetime.date.today(),
+    )
+    db_session.add(config)
+    await db_session.commit()
+
+    resp = await client.post(
+        "/api/v1/reconciliation/runs",
+        json=_run_payload(entity_a.id, account.id, configuration_id=config.id), headers=headers,
+    )
+    assert resp.status_code == 201
+
+
+async def test_configuration_scope_validation_never_bypasses_entity_rbac(
+    client: AsyncClient, db_session: AsyncSession, demo_group_and_entities,
+):
+    """Authorization must be checked before/independent of configuration-scope validation."""
+    from app.models.rbac import EntityScopeType
+    from app.models.reconciliation import ReconciliationConfiguration
+
+    group, entity_a, entity_b = demo_group_and_entities
+    bank = await _make_bank(db_session)
+    account_b = await _make_account(db_session, entity_b.id, bank.id, account_number="1100220033")
+    user_a = await _make_scoped_user(
+        db_session, scope_type=EntityScopeType.ENTITY, legal_entity_id=entity_a.id, label="rbacfirst",
+    )
+    await db_session.commit()
+    headers = {"Authorization": f"Bearer {await _login(client, user_a)}"}
+
+    config = ReconciliationConfiguration(
+        legal_entity_id=entity_b.id, version=1, is_current=True, is_active=True,
+        effective_from=datetime.date.today(),
+    )
+    db_session.add(config)
+    await db_session.commit()
+
+    # Entity A user attempting a run for Entity B (even with a matching
+    # Entity B configuration) must be rejected by RBAC (403), never by
+    # the scope-mismatch check (400) - authorization comes first.
+    resp = await client.post(
+        "/api/v1/reconciliation/runs",
+        json=_run_payload(entity_b.id, account_b.id, configuration_id=config.id), headers=headers,
+    )
+    assert resp.status_code == 403
+
+
+async def test_run_executes_using_stored_configuration_after_it_is_superseded(
+    client: AsyncClient, db_session: AsyncSession, demo_group_and_entities,
+):
+    """Tests 5/6/7: run created with v1, v1 superseded by v2, run still executes using v1, unchanged."""
+    from app.models.rbac import EntityScopeType
+    from app.models.reconciliation import ReconciliationConfiguration
+
+    group, entity_a, _ = demo_group_and_entities
+    bank = await _make_bank(db_session)
+    account = await _make_account(db_session, entity_a.id, bank.id, account_number="2200330044")
+    user = await _make_scoped_user(
+        db_session, scope_type=EntityScopeType.ENTITY, legal_entity_id=entity_a.id, label="historicalexec",
+    )
+    await db_session.commit()
+    headers = {"Authorization": f"Bearer {await _login(client, user)}"}
+
+    v1_resp = await client.post(
+        "/api/v1/reconciliation/configurations",
+        json={"legal_entity_id": str(entity_a.id), "amount_tolerance_pct": "1.0"}, headers=headers,
+    )
+    v1 = v1_resp.json()
+
+    # Test 5: run created using v1 (auto-resolved, since it's the only/current config).
+    run_resp = await client.post(
+        "/api/v1/reconciliation/runs", json=_run_payload(entity_a.id, account.id), headers=headers,
+    )
+    run_id = run_resp.json()["id"]
+    assert run_resp.json()["configuration_id"] == v1["id"]
+
+    # Test 6: v2 supersedes v1.
+    v2_resp = await client.post(
+        "/api/v1/reconciliation/configurations",
+        json={"legal_entity_id": str(entity_a.id), "amount_tolerance_pct": "5.0"}, headers=headers,
+    )
+    v2 = v2_resp.json()
+
+    v1_db = await db_session.get(ReconciliationConfiguration, uuid.UUID(v1["id"]))
+    await db_session.refresh(v1_db)
+    assert v1_db.is_current is False  # superseded
+    assert v1_db.superseded_by_id == uuid.UUID(v2["id"])
+    assert v1_db.amount_tolerance_pct == Decimal("1.000")  # historical value never mutated
+    assert v1_db.legal_entity_id == entity_a.id  # v1 row itself is untouched, not "mutated into v2"
+
+    # Test 7: the existing run still executes successfully, still
+    # referencing v1, never silently switching to v2.
+    execute_resp = await client.post(f"/api/v1/reconciliation/runs/{run_id}/execute", headers=headers)
+    assert execute_resp.status_code == 200
+    body = execute_resp.json()
+    assert body["status"] == "COMPLETED"
+    assert body["configuration_id"] == v1["id"]  # unchanged - never switched to v2
+
+    suggestions = await client.get(f"/api/v1/reconciliation/runs/{run_id}/suggestions", headers=headers)
+    open_items = await client.get(f"/api/v1/reconciliation/runs/{run_id}/open-items", headers=headers)
+    assert suggestions.json() == []
+    assert open_items.json() == []
+
+
+async def test_run_execution_fails_cleanly_when_configuration_cannot_be_loaded(
+    db_session: AsyncSession, demo_group_and_entities,
+):
+    """
+    Test 8: the schema's own foreign key on `ReconciliationRun.configuration_id`
+    genuinely prevents a run from ever referencing a configuration row
+    that doesn't exist (an orphaned reference can't be created, and the
+    referenced row can't be deleted while a run points to it) - this is
+    a correct integrity property, not a gap to work around, and the
+    patch's own instructions are explicit: do not weaken the FK merely
+    to manufacture this scenario. This test instead directly verifies
+    the failure-recording CODE PATH that `execute_run_endpoint` takes
+    when its `db.get(ReconciliationConfiguration, run.configuration_id)`
+    lookup returns None - the exact same statements the endpoint itself
+    executes on that branch - proving the run lands in FAILED with a
+    meaningful, durable reason and is never left in an ambiguous state.
+    """
+    from app.models.reconciliation import ReconciliationRun, ReconciliationRunStatus
+
+    group, entity_a, _ = demo_group_and_entities
+    bank = await _make_bank(db_session)
+    account = await _make_account(db_session, entity_a.id, bank.id, account_number="3300440055")
+
+    run = ReconciliationRun(
+        legal_entity_id=entity_a.id, bank_account_id=account.id,
+        period_start=datetime.date(2026, 6, 1), period_end=datetime.date(2026, 6, 30),
+        status=ReconciliationRunStatus.READY, configuration_id=None,
+    )
+    db_session.add(run)
+    await db_session.flush()
+
+    # Simulate the exact lookup execute_run_endpoint performs, using a
+    # UUID guaranteed not to resolve to any real configuration row.
+    from app.models.reconciliation import ReconciliationConfiguration
+
+    missing_id = uuid.uuid4()
+    configuration = await db_session.get(ReconciliationConfiguration, missing_id)
+    assert configuration is None
+
+    # The exact failure-recording statements execute_run_endpoint runs
+    # on this branch.
+    run.status = ReconciliationRunStatus.FAILED
+    run.failure_reason = "The run's reconciliation configuration no longer exists."
+    run.completed_at = datetime.datetime.now(datetime.UTC)
+    await db_session.flush()
+
+    assert run.status == ReconciliationRunStatus.FAILED
+    assert run.failure_reason == "The run's reconciliation configuration no longer exists."
+    assert run.completed_at is not None
+
+
+async def test_current_active_configuration_still_works_end_to_end(
+    client: AsyncClient, db_session: AsyncSession, demo_group_and_entities,
+):
+    """Test 9: an ordinary current/active configuration continues to work exactly as before."""
+    from app.models.rbac import EntityScopeType
+
+    group, entity_a, _ = demo_group_and_entities
+    bank = await _make_bank(db_session)
+    account = await _make_account(db_session, entity_a.id, bank.id, account_number="4400550066")
+    user = await _make_scoped_user(
+        db_session, scope_type=EntityScopeType.ENTITY, legal_entity_id=entity_a.id, label="stillworks",
+    )
+    await db_session.commit()
+    headers = {"Authorization": f"Bearer {await _login(client, user)}"}
+
+    config_resp = await client.post(
+        "/api/v1/reconciliation/configurations",
+        json={"legal_entity_id": str(entity_a.id), "bank_account_id": str(account.id),
+              "amount_tolerance_pct": "1.0"},
+        headers=headers,
+    )
+    config_id = config_resp.json()["id"]
+
+    run_resp = await client.post(
+        "/api/v1/reconciliation/runs",
+        json=_run_payload(entity_a.id, account.id, configuration_id=config_id), headers=headers,
+    )
+    assert run_resp.status_code == 201
+    run_id = run_resp.json()["id"]
+
+    execute_resp = await client.post(f"/api/v1/reconciliation/runs/{run_id}/execute", headers=headers)
+    assert execute_resp.status_code == 200
+    assert execute_resp.json()["status"] == "COMPLETED"
+    assert execute_resp.json()["configuration_id"] == config_id

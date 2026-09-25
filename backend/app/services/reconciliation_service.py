@@ -40,6 +40,51 @@ async def load_run_for_update(db: AsyncSession, run_id: uuid.UUID) -> Reconcilia
     return result.scalar_one_or_none()
 
 
+def validate_configuration_scope(
+    configuration: ReconciliationConfiguration, legal_entity_id: uuid.UUID,
+    bank_account_id: uuid.UUID, currency_code: str,
+) -> None:
+    """
+    SECTION "ISSUE 1" (Stage 5B configuration-integrity hardening patch):
+    an explicitly-supplied `configuration_id` must be compatible with the
+    run's own scope, not merely exist and be current/active. A
+    configuration's own scope fields are each either null ("applies
+    broadly at this level") or set ("applies ONLY to this specific
+    entity/account/currency") - a set field that does not match the
+    run's own value means this configuration was never meant for this
+    run, regardless of how broad its OTHER fields are. A null field
+    always matches (SECTION "Broader configurations" - an entity-wide or
+    global configuration remains valid for any account/currency within
+    the entity it does apply to).
+
+    Reused by create_reconciliation_run only for now, but kept as its
+    own function - per the patch's explicit instruction to prefer
+    reusable server-side validation over duplicating this logic - so a
+    future endpoint that also accepts an explicit configuration_id (e.g.
+    a "change run configuration" action, if ever added) has a single
+    place to call, never a second scope-validation mechanism.
+    """
+    if configuration.legal_entity_id is not None and configuration.legal_entity_id != legal_entity_id:
+        raise HTTPException(
+            status_code=400,
+            detail="The selected reconciliation configuration belongs to a different entity "
+                   "than the one requested for this run.",
+        )
+    if configuration.bank_account_id is not None and configuration.bank_account_id != bank_account_id:
+        raise HTTPException(
+            status_code=400,
+            detail="The selected reconciliation configuration belongs to a different bank "
+                   "account than the one requested for this run.",
+        )
+    if configuration.currency_code is not None and configuration.currency_code != currency_code:
+        raise HTTPException(
+            status_code=400,
+            detail=f"The selected reconciliation configuration is specific to "
+                   f"{configuration.currency_code}, which does not match this run's "
+                   f"account currency ({currency_code}).",
+        )
+
+
 async def resolve_effective_configuration(
     db: AsyncSession, legal_entity_id: uuid.UUID, bank_account_id: uuid.UUID, currency_code: str,
 ) -> ReconciliationConfiguration | None:

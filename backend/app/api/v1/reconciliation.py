@@ -45,6 +45,7 @@ from app.services.reconciliation_service import (
     load_run_for_update,
     resolve_effective_configuration,
     transition_run_status,
+    validate_configuration_scope,
 )
 
 router = APIRouter(prefix="/reconciliation", tags=["reconciliation"])
@@ -87,6 +88,13 @@ async def create_reconciliation_run(
                 status_code=400,
                 detail="The selected reconciliation configuration is not currently active.",
             )
+        # SECTION "ISSUE 1" (Stage 5B configuration-integrity hardening
+        # patch): existence + is_current/is_active alone is insufficient
+        # - a scope check is required so an Entity A run cannot be
+        # created against an Entity B (or Account B, or a mismatched
+        # currency) configuration merely because that configuration
+        # happens to exist and be active.
+        validate_configuration_scope(configuration, payload.legal_entity_id, payload.bank_account_id, account.currency_code)
     else:
         configuration = await resolve_effective_configuration(
             db, payload.legal_entity_id, payload.bank_account_id, account.currency_code,
@@ -209,10 +217,21 @@ async def execute_run_endpoint(
         await db.refresh(run)
         return run
     if run.configuration_id is not None:
+        # SECTION "ISSUE 2" (Stage 5B configuration-integrity hardening
+        # patch): a run is permanently tied to the EXACT configuration
+        # version stored on it at creation - `run.configuration_id`
+        # never changes and execution never re-resolves a newer version.
+        # A later configuration change only ever sets `is_current=False`
+        # on the superseded row (create_configuration_version never
+        # touches `is_active`); even if a future mechanism DOES
+        # deactivate a historical version, execution must still only
+        # fail when the configuration cannot be loaded at all - never
+        # merely because it is no longer current/active. Both flags are
+        # deliberately NOT checked here.
         configuration = await db.get(ReconciliationConfiguration, run.configuration_id)
-        if configuration is None or not configuration.is_active:
+        if configuration is None:
             run.status = ReconciliationRunStatus.FAILED
-            run.failure_reason = "The run's reconciliation configuration is no longer available or active."
+            run.failure_reason = "The run's reconciliation configuration no longer exists."
             run.completed_at = datetime.datetime.now(datetime.UTC)
             await db.commit()
             await db.refresh(run)
