@@ -10,9 +10,10 @@ entity, bank account, currency, direction compatibility, a narrow date
 window (the run's own configured tolerance, never the full run period,
 per SECTION 17), an amount-tolerance band, POSTED status only, and
 excluding TreasuryTransaction rows already claimed by an existing
-PENDING/ACCEPTED suggestion from ANY run (SECTION 39 - a transaction
-that already has a live suggestion is not offered as a fresh candidate
-again).
+PENDING/ACCEPTED suggestion FROM THE SAME LEGAL ENTITY (SECTION 39 - a
+transaction that already has a live suggestion is not offered as a
+fresh candidate again; the entity-scoping itself is a hardening-patch
+fix - see already_claimed_treasury_transaction_ids's own docstring).
 """
 import datetime
 import uuid
@@ -40,12 +41,31 @@ async def already_claimed_treasury_transaction_ids(db: AsyncSession, legal_entit
     match for something that already has one. REJECTED/SUPERSEDED
     suggestions do NOT hold a claim - a rejected suggestion's
     transaction remains eligible for a future run's candidate pool.
+
+    Entity-scoped (hardening patch): `ReconciliationMatchSuggestion`
+    itself carries no `legal_entity_id` column, so this scopes through
+    the one authoritative existing relationship that does -
+    `TreasuryTransaction.legal_entity_id`, joined via
+    `treasury_transaction_id` - rather than scanning every entity's
+    claims and filtering in Python, or inventing a new denormalized
+    entity column on the suggestion table. `TreasuryTransaction.id` is
+    the join's own primary key and `legal_entity_id` is already indexed
+    (SECTION 7 of the Stage 5C doc), so this join is a normal indexed
+    lookup, not a new performance concern - no migration is required.
     """
-    stmt = select(ReconciliationMatchSuggestion.treasury_transaction_id).where(
-        ReconciliationMatchSuggestion.status.in_(
-            (MatchSuggestionStatus.PENDING, MatchSuggestionStatus.ACCEPTED)
-        ),
-        ReconciliationMatchSuggestion.treasury_transaction_id.is_not(None),
+    stmt = (
+        select(ReconciliationMatchSuggestion.treasury_transaction_id)
+        .join(
+            TreasuryTransaction,
+            TreasuryTransaction.id == ReconciliationMatchSuggestion.treasury_transaction_id,
+        )
+        .where(
+            ReconciliationMatchSuggestion.status.in_(
+                (MatchSuggestionStatus.PENDING, MatchSuggestionStatus.ACCEPTED)
+            ),
+            ReconciliationMatchSuggestion.treasury_transaction_id.is_not(None),
+            TreasuryTransaction.legal_entity_id == legal_entity_id,
+        )
     )
     result = await db.execute(stmt)
     return {row[0] for row in result.all()}

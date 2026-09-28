@@ -660,6 +660,12 @@ export interface ReconciliationRunOut {
   configuration_id: string | null;
   statement_transaction_count: number;
   eligible_transaction_count: number;
+  candidate_count: number;
+  suggestion_count: number;
+  matched_count: number;
+  ambiguous_count: number;
+  unmatched_count: number;
+  matching_rule_version: string | null;
   notes: string | null;
   failure_reason: string | null;
   started_at: string | null;

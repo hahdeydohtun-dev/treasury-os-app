@@ -54,11 +54,33 @@ one — see Section 6), `status = POSTED`, an `event_date` window (the
 bank transaction's own date ± the run's configured
 `date_tolerance_days`), and a `transaction_amount` band (± the run's
 configured `amount_tolerance_pct`). Rows already claimed by a live
-(`PENDING`/`ACCEPTED`) suggestion from *any* run are excluded
-(`already_claimed_treasury_transaction_ids`). No candidate outside these
-filters is ever loaded into Python — verified by
+(`PENDING`/`ACCEPTED`) suggestion **from the same legal entity** are
+excluded (`already_claimed_treasury_transaction_ids`). No candidate
+outside these filters is ever loaded into Python — verified by
 `test_candidate_generation_uses_database_filtering_not_full_scan`
 (51 rows seeded, only the 1 genuinely in-scope row returned).
+
+**Entity-scoped claim lookup (final hardening patch)**:
+`already_claimed_treasury_transaction_ids` accepted a `legal_entity_id`
+parameter from its first implementation, but the query itself did not
+use it — an oversight found in a later hardening pass, not a redesign.
+`ReconciliationMatchSuggestion` carries no `legal_entity_id` column of
+its own, so the fix joins to `TreasuryTransaction` (via
+`treasury_transaction_id`) and filters on
+`TreasuryTransaction.legal_entity_id` — the one authoritative existing
+relationship that already carries entity ownership, rather than adding
+a new denormalized column or inventing a different relationship. This
+is a defense-in-depth/correctness fix, not a response to a demonstrated
+cross-entity data leak: `TreasuryTransaction` UUIDs are globally unique,
+so the unscoped version never actually returned another entity's real
+transaction as a false positive — but an unscoped global scan across
+every entity's claims was still broader than the function's own
+contract implied, and a genuine correctness risk for future callers.
+Verified by `test_already_claimed_lookup_is_entity_scoped`,
+`test_entity_filter_comes_from_treasury_transaction_relationship_not_uuid_assumption`,
+`test_candidate_generation_regression_entity_b_never_a_candidate_for_entity_a_run`,
+and `test_cross_group_claimed_transactions_never_leak`. No migration was
+required — `TreasuryTransaction.legal_entity_id` was already indexed.
 
 ## 5. Matching signals and normalization
 

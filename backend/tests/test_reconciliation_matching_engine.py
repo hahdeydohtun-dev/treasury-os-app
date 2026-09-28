@@ -1014,3 +1014,250 @@ async def test_candidate_generation_uses_database_filtering_not_full_scan(
     # exactly the one genuinely in-scope row - never the other 50.
     assert len(candidates) == 1
     assert candidates[0].reference == "REF-PERF"
+
+
+# ---------------------------------------------------------------------------
+# Stage 5C final hardening: entity-scoped claim protection
+# ---------------------------------------------------------------------------
+
+async def test_already_claimed_lookup_is_entity_scoped(
+    db_session: AsyncSession, demo_group_and_entities, cash_event_types,
+):
+    """Test 1: Entity A's helper call must return only Entity A's claimed IDs, never Entity B's."""
+    from app.models.reconciliation import (
+        MatchSuggestionStatus,
+        ReconciliationMatchSuggestion,
+        ReconciliationRun,
+        ReconciliationRunStatus,
+    )
+    from app.services.reconciliation_candidate_generation import (
+        already_claimed_treasury_transaction_ids,
+    )
+
+    group, entity_a, entity_b = demo_group_and_entities
+    bank = await _make_bank(db_session)
+    account_a = await _make_account(db_session, entity_a.id, bank.id, account_number="4444000011")
+    account_b = await _make_account(db_session, entity_b.id, bank.id, account_number="4444000022")
+
+    ledger_a = await _make_treasury_txn(
+        db_session, entity_id=entity_a.id, account_id=account_a.id, direction="INFLOW", reference="CLAIM-A",
+    )
+    ledger_b = await _make_treasury_txn(
+        db_session, entity_id=entity_b.id, account_id=account_b.id, direction="INFLOW", reference="CLAIM-B",
+    )
+    bank_txn_a = await _make_bank_statement_txn(
+        db_session, entity_id=entity_a.id, account_id=account_a.id, bank_reference="CLAIM-A",
+    )
+    bank_txn_b = await _make_bank_statement_txn(
+        db_session, entity_id=entity_b.id, account_id=account_b.id, bank_reference="CLAIM-B",
+    )
+
+    run_a = ReconciliationRun(
+        legal_entity_id=entity_a.id, bank_account_id=account_a.id,
+        period_start=datetime.date(2026, 6, 1), period_end=datetime.date(2026, 6, 30),
+        status=ReconciliationRunStatus.RUNNING,
+    )
+    run_b = ReconciliationRun(
+        legal_entity_id=entity_b.id, bank_account_id=account_b.id,
+        period_start=datetime.date(2026, 6, 1), period_end=datetime.date(2026, 6, 30),
+        status=ReconciliationRunStatus.RUNNING,
+    )
+    db_session.add_all([run_a, run_b])
+    await db_session.flush()
+
+    db_session.add(ReconciliationMatchSuggestion(
+        reconciliation_run_id=run_a.id, bank_statement_transaction_id=bank_txn_a.id,
+        treasury_transaction_id=ledger_a.id, status=MatchSuggestionStatus.PENDING,
+    ))
+    db_session.add(ReconciliationMatchSuggestion(
+        reconciliation_run_id=run_b.id, bank_statement_transaction_id=bank_txn_b.id,
+        treasury_transaction_id=ledger_b.id, status=MatchSuggestionStatus.PENDING,
+    ))
+    await db_session.commit()
+
+    claimed_for_a = await already_claimed_treasury_transaction_ids(db_session, entity_a.id)
+    claimed_for_b = await already_claimed_treasury_transaction_ids(db_session, entity_b.id)
+
+    assert claimed_for_a == {ledger_a.id}
+    assert ledger_b.id not in claimed_for_a  # Entity B's claim must never appear for Entity A
+    assert claimed_for_b == {ledger_b.id}
+    assert ledger_a.id not in claimed_for_b
+
+
+async def test_entity_filter_comes_from_treasury_transaction_relationship_not_uuid_assumption(
+    db_session: AsyncSession, demo_group_and_entities, cash_event_types,
+):
+    """
+    Test 2: proves the filter is driven by the real
+    TreasuryTransaction.legal_entity_id relationship, not any assumption
+    about UUID namespacing - two suggestions referencing two DIFFERENT
+    TreasuryTransaction rows (genuinely distinct UUIDs, no collision)
+    that happen to belong to the same entity must BOTH be returned,
+    while a third belonging to a different entity is excluded, exactly
+    matching what a join on the real FK relationship would produce.
+    """
+    from app.models.reconciliation import (
+        MatchSuggestionStatus,
+        ReconciliationMatchSuggestion,
+        ReconciliationRun,
+        ReconciliationRunStatus,
+    )
+    from app.services.reconciliation_candidate_generation import (
+        already_claimed_treasury_transaction_ids,
+    )
+
+    group, entity_a, entity_b = demo_group_and_entities
+    bank = await _make_bank(db_session)
+    account_a = await _make_account(db_session, entity_a.id, bank.id, account_number="4444000033")
+    account_b = await _make_account(db_session, entity_b.id, bank.id, account_number="4444000044")
+
+    ledger_a1 = await _make_treasury_txn(
+        db_session, entity_id=entity_a.id, account_id=account_a.id, direction="INFLOW", reference="A1",
+    )
+    ledger_a2 = await _make_treasury_txn(
+        db_session, entity_id=entity_a.id, account_id=account_a.id, direction="INFLOW", reference="A2",
+    )
+    ledger_b1 = await _make_treasury_txn(
+        db_session, entity_id=entity_b.id, account_id=account_b.id, direction="INFLOW", reference="B1",
+    )
+    bank_txn_1 = await _make_bank_statement_txn(db_session, entity_id=entity_a.id, account_id=account_a.id)
+    bank_txn_2 = await _make_bank_statement_txn(db_session, entity_id=entity_a.id, account_id=account_a.id)
+    bank_txn_3 = await _make_bank_statement_txn(db_session, entity_id=entity_b.id, account_id=account_b.id)
+
+    run = ReconciliationRun(
+        legal_entity_id=entity_a.id, bank_account_id=account_a.id,
+        period_start=datetime.date(2026, 6, 1), period_end=datetime.date(2026, 6, 30),
+        status=ReconciliationRunStatus.RUNNING,
+    )
+    db_session.add(run)
+    await db_session.flush()
+
+    db_session.add_all([
+        ReconciliationMatchSuggestion(
+            reconciliation_run_id=run.id, bank_statement_transaction_id=bank_txn_1.id,
+            treasury_transaction_id=ledger_a1.id, status=MatchSuggestionStatus.PENDING,
+        ),
+        ReconciliationMatchSuggestion(
+            reconciliation_run_id=run.id, bank_statement_transaction_id=bank_txn_2.id,
+            treasury_transaction_id=ledger_a2.id, status=MatchSuggestionStatus.ACCEPTED,
+        ),
+        ReconciliationMatchSuggestion(
+            reconciliation_run_id=run.id, bank_statement_transaction_id=bank_txn_3.id,
+            treasury_transaction_id=ledger_b1.id, status=MatchSuggestionStatus.PENDING,
+        ),
+    ])
+    await db_session.commit()
+
+    claimed = await already_claimed_treasury_transaction_ids(db_session, entity_a.id)
+    assert claimed == {ledger_a1.id, ledger_a2.id}  # both Entity A rows, via the real FK relationship
+    assert ledger_b1.id not in claimed
+
+
+async def test_candidate_generation_regression_entity_b_never_a_candidate_for_entity_a_run(
+    client: AsyncClient, db_session: AsyncSession, demo_group_and_entities, cash_event_types,
+):
+    """Test 3: end-to-end via the actual run/execute API - Entity B's ledger transaction never surfaces as a candidate."""
+    from app.models.rbac import EntityScopeType
+
+    group, entity_a, entity_b = demo_group_and_entities
+    bank = await _make_bank(db_session)
+    account_a = await _make_account(db_session, entity_a.id, bank.id, account_number="4444000055")
+    account_b = await _make_account(db_session, entity_b.id, bank.id, account_number="4444000066")
+    user = await _make_scoped_user(
+        db_session, scope_type=EntityScopeType.ENTITY, legal_entity_id=entity_a.id, label="claimscoperegress",
+    )
+    await db_session.flush()
+
+    await _make_bank_statement_txn(
+        db_session, entity_id=entity_a.id, account_id=account_a.id, bank_reference="PAY-SCOPE-REGRESS",
+    )
+    ledger_a = await _make_treasury_txn(
+        db_session, entity_id=entity_a.id, account_id=account_a.id, direction="INFLOW",
+        reference="PAY-SCOPE-REGRESS",
+    )
+    await _make_treasury_txn(
+        db_session, entity_id=entity_b.id, account_id=account_b.id, direction="INFLOW",
+        reference="PAY-SCOPE-REGRESS",
+    )
+    await db_session.commit()
+    headers = {"Authorization": f"Bearer {await _login(client, user)}"}
+
+    run_id = await _create_ready_run(client, headers, entity_a.id, account_a.id)
+    execute_resp = await client.post(f"/api/v1/reconciliation/runs/{run_id}/execute", headers=headers)
+    body = execute_resp.json()
+    assert body["candidate_count"] == 1  # only Entity A's own ledger row, never Entity B's
+    assert body["matched_count"] == 1
+
+    suggestions = await _get_suggestions(client, headers, run_id)
+    assert len(suggestions) == 1
+    assert suggestions[0]["treasury_transaction_id"] == str(ledger_a.id)
+
+
+async def test_cross_group_claimed_transactions_never_leak(
+    db_session: AsyncSession, demo_group_and_entities, cash_event_types,
+):
+    """Test 5: Group A's entity must never see Group B's entity claims through this helper."""
+    from app.models.entity import Group, LegalEntity
+    from app.models.reconciliation import (
+        MatchSuggestionStatus,
+        ReconciliationMatchSuggestion,
+        ReconciliationRun,
+        ReconciliationRunStatus,
+    )
+    from app.services.reconciliation_candidate_generation import (
+        already_claimed_treasury_transaction_ids,
+    )
+
+    group, entity_a, _ = demo_group_and_entities
+    bank = await _make_bank(db_session)
+    account_a = await _make_account(db_session, entity_a.id, bank.id, account_number="4444000077")
+
+    group2 = Group(name="Claim Scope Group 2", code="CLAIMGRP2", reporting_currency_code="USD")
+    db_session.add(group2)
+    await db_session.flush()
+    entity_c = LegalEntity(
+        group_id=group2.id, name="Claim Scope Entity C", code="CLAIMENTC",
+        functional_currency_code="USD", country="US",
+    )
+    db_session.add(entity_c)
+    await db_session.flush()
+    account_c = await _make_account(db_session, entity_c.id, bank.id, currency="USD", account_number="4444000088")
+
+    ledger_a = await _make_treasury_txn(
+        db_session, entity_id=entity_a.id, account_id=account_a.id, direction="INFLOW", reference="GRP-A",
+    )
+    ledger_c = await _make_treasury_txn(
+        db_session, entity_id=entity_c.id, account_id=account_c.id, currency="USD", direction="INFLOW",
+        reference="GRP-C",
+    )
+    bank_txn_a = await _make_bank_statement_txn(db_session, entity_id=entity_a.id, account_id=account_a.id)
+    bank_txn_c = await _make_bank_statement_txn(
+        db_session, entity_id=entity_c.id, account_id=account_c.id, currency="USD",
+    )
+
+    run_a = ReconciliationRun(
+        legal_entity_id=entity_a.id, bank_account_id=account_a.id,
+        period_start=datetime.date(2026, 6, 1), period_end=datetime.date(2026, 6, 30),
+        status=ReconciliationRunStatus.RUNNING,
+    )
+    run_c = ReconciliationRun(
+        legal_entity_id=entity_c.id, bank_account_id=account_c.id,
+        period_start=datetime.date(2026, 6, 1), period_end=datetime.date(2026, 6, 30),
+        status=ReconciliationRunStatus.RUNNING,
+    )
+    db_session.add_all([run_a, run_c])
+    await db_session.flush()
+
+    db_session.add(ReconciliationMatchSuggestion(
+        reconciliation_run_id=run_a.id, bank_statement_transaction_id=bank_txn_a.id,
+        treasury_transaction_id=ledger_a.id, status=MatchSuggestionStatus.PENDING,
+    ))
+    db_session.add(ReconciliationMatchSuggestion(
+        reconciliation_run_id=run_c.id, bank_statement_transaction_id=bank_txn_c.id,
+        treasury_transaction_id=ledger_c.id, status=MatchSuggestionStatus.PENDING,
+    ))
+    await db_session.commit()
+
+    claimed_for_a = await already_claimed_treasury_transaction_ids(db_session, entity_a.id)
+    assert claimed_for_a == {ledger_a.id}
+    assert ledger_c.id not in claimed_for_a  # a different group entirely must never leak in

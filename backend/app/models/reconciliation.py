@@ -110,15 +110,35 @@ class ReconciliationRun(Base, UUIDPKMixin, TimestampMixin):
 
     # SECTION 4/9 (Stage 5B spec): populated only by the execution
     # boundary, never by creation. Both default to 0 and remain 0 until
-    # POST /reconciliation/runs/{id}/execute actually runs. Stage 5B
-    # itself does no eligibility filtering - eligible_transaction_count
-    # is set equal to statement_transaction_count for now, a placeholder
-    # Stage 5C will refine once real matching eligibility rules exist.
+    # POST /reconciliation/runs/{id}/execute actually runs.
     statement_transaction_count: Mapped[int] = mapped_column(default=0, nullable=False)
     eligible_transaction_count: Mapped[int] = mapped_column(default=0, nullable=False)
 
+    # SECTION 47 (Stage 5C): deterministic matching-engine execution
+    # summary counts, populated only by execute_reconciliation_run.
+    # `matched_count` = suggestions with an unambiguous single top
+    # candidate meeting AUTO_MATCH_THRESHOLD; `ambiguous_count` = bank
+    # transactions with 2+ candidates tied at the top score (SECTION 23/
+    # 68 - never arbitrarily resolved); `unmatched_count` = bank
+    # transactions with no candidate clearing REVIEW_THRESHOLD.
+    # `candidate_count`/`suggestion_count` are raw totals across the
+    # whole run. "Matched" here means "the deterministic engine
+    # proposed a suggestion" - SECTION 48 is explicit that this is NOT
+    # the same as "reconciled" (a human/workflow outcome, not built yet).
+    candidate_count: Mapped[int] = mapped_column(default=0, nullable=False)
+    suggestion_count: Mapped[int] = mapped_column(default=0, nullable=False)
+    matched_count: Mapped[int] = mapped_column(default=0, nullable=False)
+    ambiguous_count: Mapped[int] = mapped_column(default=0, nullable=False)
+    unmatched_count: Mapped[int] = mapped_column(default=0, nullable=False)
+
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # SECTION 25 (Stage 5C): the exact matching-rule version this run's
+    # execution used - stored on the run itself (in addition to being
+    # stored per-suggestion) so a run's own summary counts can always be
+    # traced back to precisely which scoring/threshold rules produced
+    # them, even before opening any individual suggestion.
+    matching_rule_version: Mapped[str | None] = mapped_column(String(50), nullable=True)
 
     created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id"), nullable=True
@@ -149,10 +169,18 @@ class MatchType(str, Enum):
     """
     SECTION 7/8: a reserved, extensible vocabulary for the KIND of
     correspondence a future suggestion proposes - not itself a matching
-    rule. OTHER is the only value any Stage 5B code could ever use if it
-    needed a placeholder; in practice Stage 5B creates zero suggestions,
-    so no code path in this stage sets any of these.
+    rule. EXACT and TOLERANCE (Stage 5C) distinguish whether every
+    exactly-comparable signal (amount, date, reference) matched exactly
+    or only within the run's configured tolerance - see
+    docs/STAGE_5C_DETERMINISTIC_MATCHING_ENGINE.md. The remaining values
+    are reserved for later stages: ONE_TO_MANY/MANY_TO_ONE/BATCH_PAYMENT/
+    INTERNAL_TRANSFER/FX_ADJUSTED (Stage 5D), BANK_CHARGE (Stage 5D), and
+    OTHER as a general fallback. Stage 5C is one-to-one matching only
+    (SECTION 23 of the Stage 5C spec) - it never sets ONE_TO_ONE or any
+    of the Stage 5D-reserved values itself.
     """
+    EXACT = "EXACT"
+    TOLERANCE = "TOLERANCE"
     ONE_TO_ONE = "ONE_TO_ONE"
     ONE_TO_MANY = "ONE_TO_MANY"
     MANY_TO_ONE = "MANY_TO_ONE"
@@ -171,6 +199,16 @@ class ReconciliationMatchSuggestion(Base, UUIDPKMixin, TimestampMixin):
     "do not make both sides mandatory") so a future "no candidate found"
     placeholder suggestion remains representable without inventing a
     fake counterpart record.
+
+    Stage 5C idempotency (SECTIONS 27): two partial unique indexes
+    (hand-written in their own migration, not declared here - the same
+    established convention as every other partial unique index in this
+    codebase) back the application-level check in
+    reconciliation_matching_engine.py: at most one suggestion per
+    (run, bank_statement_transaction_id, treasury_transaction_id) when
+    treasury_transaction_id is set, and at most one "no candidate found"
+    suggestion (treasury_transaction_id IS NULL) per
+    (run, bank_statement_transaction_id).
     """
     __tablename__ = "reconciliation_match_suggestions"
 
