@@ -158,8 +158,28 @@ authoritative, deterministic rate-selection function:
   referencing its own `fx_rate_id` forever — adding a newer FX rate
   afterward never changes what an already-created group points to
   (verified explicitly).
-- **Decimal arithmetic**: `converted_amount = (bank_amount * rate).quantize(Decimal("0.01"))`
-  — `Decimal` throughout, never `float`.
+- **Decimal arithmetic and conversion precision**: `convert_fx_amount`
+  computes `(bank_amount * rate)` in `Decimal` throughout (never `float`
+  or `round()`) and quantizes to the configured `Currency.decimal_places`
+  of the currency the result is **denominated in**. The rate is selected
+  as bank currency (source, `from_currency_code`) → ledger transaction
+  currency (target, `to_currency_code`) and used directly, so the
+  converted amount is in the ledger currency and **that** currency's
+  `decimal_places` controls precision. FX conversion never assumes a
+  universal two-decimal precision (an earlier version hardcoded
+  `Decimal("0.01")`). Rounding is `ROUND_HALF_UP`, the repository's
+  existing monetary convention; the earlier code passed no mode and
+  inherited the Decimal default (`ROUND_HALF_EVEN`), which differs only on
+  exact `.5` ties. FX tolerance is evaluated on the quantized amount;
+  rate selection and the tolerance semantics themselves are unchanged.
+  For an FX group, the stored `difference` is `|converted - ledger|` in
+  the ledger currency (it was previously `|bank - ledger|`, which
+  subtracted amounts in two different currencies and was meaningless).
+  Known limit: `difference`, `*_aggregate_amount`, and the
+  `TreasuryTransaction`/`BankStatementTransaction` amount columns are
+  `Numeric(20,2)`, so a currency with more than two decimal places can be
+  compared at full precision but not stored beyond two places on those
+  columns; the exact quantized conversion is recorded in `reason`.
 
 ## 8. FX match decision
 

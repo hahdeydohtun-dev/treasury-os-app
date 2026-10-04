@@ -33,7 +33,7 @@ member" pass is attempted if the full set doesn't sum within tolerance
 import datetime
 import uuid
 from dataclasses import dataclass, field
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -43,7 +43,7 @@ from app.models.bank_statement import (
     BankStatementTransaction,
     BankStatementTransactionStatus,
 )
-from app.models.currency import FXRate, FXRateType
+from app.models.currency import Currency, FXRate, FXRateType
 from app.models.lookup import CashDirection
 from app.models.reconciliation import (
     MatchGroupStatus,
@@ -126,8 +126,11 @@ async def _persist_group(
     fx_source: str | None = None, fx_target: str | None = None, fx_rate: Decimal | None = None,
     fx_rate_date: datetime.date | None = None, fx_rate_id: uuid.UUID | None = None,
     fx_rate_type: str | None = None, fx_rate_source: str | None = None, fx_tolerance_pct: Decimal | None = None,
+    difference: Decimal | None = None,
 ) -> bool:
-    """Returns True if a new group was persisted, False if it already existed (idempotency, SECTION 21)."""
+    """Returns True if a new group was persisted, False if it already existed (idempotency, SECTION 21).
+    `difference` is only passed for FX groups, where bank and ledger aggregates are in DIFFERENT
+    currencies so their direct subtraction is meaningless; it carries |converted - ledger| instead."""
     group_key = compute_group_key(relationship_type, bank_ids, ledger_ids)
     if await _existing_group(db, run_id, group_key) is not None:
         return False
@@ -135,7 +138,8 @@ async def _persist_group(
     group = ReconciliationMatchGroup(
         reconciliation_run_id=run_id, relationship_type=relationship_type, status=status,
         bank_aggregate_amount=bank_aggregate, ledger_aggregate_amount=ledger_aggregate,
-        currency_code=currency_code, difference=abs(bank_aggregate - ledger_aggregate),
+        currency_code=currency_code,
+        difference=difference if difference is not None else abs(bank_aggregate - ledger_aggregate),
         fx_source_currency_code=fx_source, fx_target_currency_code=fx_target, fx_rate=fx_rate,
         fx_rate_date=fx_rate_date, fx_rate_id=fx_rate_id, fx_rate_type=fx_rate_type,
         fx_rate_source=fx_rate_source, fx_tolerance_pct=fx_tolerance_pct, score=score, confidence=score,
@@ -686,6 +690,20 @@ async def select_fx_rate(
     )
 
 
+def convert_fx_amount(amount: Decimal, rate: Decimal, target_decimal_places: int) -> Decimal:
+    """
+    FX precision correction: quantize the converted amount to the configured
+    `Currency.decimal_places` of the currency the result is DENOMINATED IN,
+    never an assumed two decimals. Pure Decimal arithmetic (no float, no
+    round()). Rounding mode is ROUND_HALF_UP, the repository's existing
+    monetary convention (investment/facility/forecast engines); the previous
+    code passed no mode and silently inherited the Decimal context default
+    (ROUND_HALF_EVEN), which differs only on exact .5 ties.
+    """
+    precision = Decimal(1).scaleb(-target_decimal_places)
+    return (amount * rate).quantize(precision, rounding=ROUND_HALF_UP)
+
+
 async def detect_fx_matches(
     db: AsyncSession, run_id: uuid.UUID, legal_entity_id: uuid.UUID, bank_account_id: uuid.UUID,
     period_start: datetime.date, period_end: datetime.date, configuration: ReconciliationConfiguration | None,
@@ -747,7 +765,18 @@ async def detect_fx_matches(
                 continue  # SECTION 16/16A: no authoritative rate (or ambiguous/stale/wrong type) -> NO FX MATCH
             rate = selection.fx_rate
 
-            converted_amount = (bank_txn.amount * rate.rate).quantize(Decimal("0.01"))
+            # Direction (traced, unchanged): the rate is selected as
+            # bank currency (source, from_currency_code) -> ledger
+            # transaction currency (target, to_currency_code), used directly
+            # with no inversion. The converted amount is therefore
+            # denominated in the LEDGER currency, whose configured
+            # decimal_places controls quantization. A missing currency row
+            # cannot normally occur (FK) but is treated as NO FX MATCH
+            # rather than assuming a precision.
+            target_currency = await db.get(Currency, ledger_txn.transaction_currency_code)
+            if target_currency is None:
+                continue
+            converted_amount = convert_fx_amount(bank_txn.amount, rate.rate, target_currency.decimal_places)
             allowed_diff = ledger_txn.transaction_amount * (cfg["fx_tolerance_pct"] / Decimal(100))
             if abs(converted_amount - ledger_txn.transaction_amount) > allowed_diff:
                 continue
@@ -766,6 +795,7 @@ async def detect_fx_matches(
                 fx_target=ledger_txn.transaction_currency_code, fx_rate=rate.rate, fx_rate_date=rate.rate_date,
                 fx_rate_id=rate.id, fx_rate_type=rate.rate_type.value, fx_rate_source=rate.rate_source,
                 fx_tolerance_pct=cfg["fx_tolerance_pct"],
+                difference=abs(converted_amount - ledger_txn.transaction_amount),
             )
             if created:
                 result.advanced_match_count += 1
