@@ -174,7 +174,7 @@ Run tests:
 pytest -q
 ```
 
-296 tests across Stage 0-5D (facilities, funding actions, forecast
+325 tests across Stage 0-5D (facilities, funding actions, forecast
 engine, security/RBAC hardening, Excel Data Hub, investments, Stage
 3/4 financial-integrity/concurrency hardening passes, bank statement
 ingestion, the reconciliation data model, the deterministic matching

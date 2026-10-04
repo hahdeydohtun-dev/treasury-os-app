@@ -24,6 +24,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.monetary import has_excess_precision
 from app.models.balance import BankBalance
 from app.models.bank_charge import BankCharge
 from app.models.banking import Bank, BankAccount
@@ -252,9 +253,14 @@ async def _validate_bank_transaction_row(row: dict, db: AsyncSession) -> list[Ro
     if not await _currency_exists(db, currency):
         issues.append(RowIssue("Currency", row.get("Currency"), "ERROR", "INVALID_CURRENCY",
                                 "Invalid or unknown currency code."))
-    if _parse_decimal(row.get("Amount")) is None:
+    parsed_amount = _parse_decimal(row.get("Amount"))
+    if parsed_amount is None:
         issues.append(RowIssue("Amount", row.get("Amount"), "ERROR", "INVALID_AMOUNT",
                                 "Amount is required and must be numeric."))
+    elif has_excess_precision(parsed_amount):
+        issues.append(RowIssue("Amount", row.get("Amount"), "ERROR", "AMOUNT_PRECISION_EXCEEDED",
+                                "Amount has more than 2 decimal places; persisted monetary precision "
+                                "is 2 and it would be silently rounded."))
     dc = (row.get("Debit/Credit") or "").upper()
     if dc not in ("DEBIT", "CREDIT", "D", "C"):
         issues.append(RowIssue("Debit/Credit", row.get("Debit/Credit"), "ERROR",

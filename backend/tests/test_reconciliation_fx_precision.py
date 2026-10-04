@@ -52,7 +52,9 @@ def test_conversion_stays_decimal_throughout():
 
 
 # ---------------------------------------------------------------------------
-# Integration: precision of the LEDGER (target) currency drives the match
+# Integration: precision of the LEDGER (target) currency drives the match.
+# Persisted monetary precision is 2 decimals (app/core/monetary.py), so only 0-2 decimal
+# currencies can be configured; 3/4-decimal behaviour is covered at the pure-helper level above.
 # ---------------------------------------------------------------------------
 
 async def _ensure_currency(db_session, code, decimal_places):
@@ -149,31 +151,10 @@ async def test_two_decimal_target_currency_regression(
     assert "= 15833333.33 NGN" in groups[0]["reason"]
 
 
-async def test_three_decimal_target_currency_is_not_rounded_to_two_places(
-    client: AsyncClient, db_session: AsyncSession, demo_group_and_entities, cash_event_types,
-):
-    # 1000 USD * 0.3072345 = 307.2345 -> 307.235 (3 dp). Ledger amounts are
-    # stored at 2 dp (307.24). Under the OLD hardcoded 2-dp rounding the
-    # converted value would have been 307.23/307.24 and matched at zero
-    # tolerance; correctly keeping 3 dp, 307.235 != 307.24 -> NO match.
-    body, groups, _, _ = await _run_fx_scenario(
-        client, db_session, demo_group_and_entities, label="kwdnomatch", account_number="5151000044",
-        target_currency="KWD", target_dp=3, rate="0.3072345", bank_amount="1000", ledger_amount="307.24",
-        fx_tolerance_pct="0",
-    )
-    assert body["advanced_match_count"] == 0 and groups == []
 
 
-async def test_three_decimal_target_currency_matches_within_tolerance_on_quantized_value(
-    client: AsyncClient, db_session: AsyncSession, demo_group_and_entities, cash_event_types,
-):
-    body, groups, _, _ = await _run_fx_scenario(
-        client, db_session, demo_group_and_entities, label="kwdmatch", account_number="5151000055",
-        target_currency="KWD", target_dp=3, rate="0.3072345", bank_amount="1000", ledger_amount="307.24",
-        fx_tolerance_pct="0.01",
-    )
-    assert body["advanced_match_count"] == 1
-    assert "= 307.235 KWD" in groups[0]["reason"]  # three decimals retained in the recorded conversion
+
+
 
 
 async def test_tolerance_is_evaluated_on_the_quantized_amount(

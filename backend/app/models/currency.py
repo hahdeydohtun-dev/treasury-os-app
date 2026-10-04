@@ -10,7 +10,7 @@ import uuid
 from decimal import Decimal
 from enum import Enum
 
-from sqlalchemy import Date, ForeignKey, Numeric, String, UniqueConstraint
+from sqlalchemy import CheckConstraint, Date, ForeignKey, Numeric, String, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -23,6 +23,11 @@ class Currency(Base, TimestampMixin, SoftDeleteMixin):
     keys elsewhere read naturally (e.g. transaction_currency = 'USD').
     """
     __tablename__ = "currencies"
+    __table_args__ = (
+        CheckConstraint(
+            "decimal_places BETWEEN 0 AND 2", name="ck_currencies_decimal_places_supported",
+        ),
+    )
 
     code: Mapped[str] = mapped_column(String(3), primary_key=True)
     name: Mapped[str] = mapped_column(String(100), nullable=False)

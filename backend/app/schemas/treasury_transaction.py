@@ -18,7 +18,7 @@ class TreasuryTransactionCreate(BaseModel):
     posting_date: datetime.date | None = None
 
     transaction_currency_code: str = Field(min_length=3, max_length=3)
-    transaction_amount: Decimal
+    transaction_amount: Decimal = Field(decimal_places=2)
     functional_currency_code: str | None = Field(default=None, min_length=3, max_length=3)
     functional_amount: Decimal | None = None
     reporting_currency_code: str | None = Field(default=None, min_length=3, max_length=3)

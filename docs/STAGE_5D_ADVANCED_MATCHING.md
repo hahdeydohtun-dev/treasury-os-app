@@ -175,11 +175,54 @@ authoritative, deterministic rate-selection function:
   For an FX group, the stored `difference` is `|converted - ledger|` in
   the ledger currency (it was previously `|bank - ledger|`, which
   subtracted amounts in two different currencies and was meaningless).
-  Known limit: `difference`, `*_aggregate_amount`, and the
-  `TreasuryTransaction`/`BankStatementTransaction` amount columns are
-  `Numeric(20,2)`, so a currency with more than two decimal places can be
-  compared at full precision but not stored beyond two places on those
-  columns; the exact quantized conversion is recorded in `reason`.
+  The persisted-precision consequence of this is covered by the
+  "Monetary precision policy" section below.
+
+## 7a. Monetary precision policy (schema integrity)
+
+**Persisted monetary precision in Treasury OS is two decimal places,
+system-wide.** Evidence from the repository (not an invented policy): every
+cash/reconciliation amount column (e.g. `treasury_transactions.transaction_amount`,
+`bank_statement_transactions.amount`, `bank_balances.*`) is `Numeric(20,2)` (60 numeric
+columns in the schema carry scale 2; the others are rates, percentages and quantities); the forecast,
+investment and facility engines all quantize with a hardcoded two-place
+`TWO_DP`; `FORECAST_METHODOLOGY.md` states every stored amount is rounded
+to 2 places with `ROUND_HALF_UP`; 149 existing test assertions pin
+two-decimal API strings (widening columns would change every API
+response's scale); and, before this correction, the only reader of
+`Currency.decimal_places` anywhere was Stage 5D's own FX conversion.
+Widening columns was therefore **not** done: it would not make the cash,
+forecast or investment engines honour 3+ decimals (they round to two),
+and it would change Stage 1-4 output.
+
+The real hazard was different: `Currency.decimal_places` was an
+unbounded integer, and PostgreSQL **silently rounds** a 3-decimal value
+inserted into `Numeric(20,2)`. This is now closed without touching any
+stored value:
+
+- **Supported range: 0-2.** `ck_currencies_decimal_places_supported`
+  (`CHECK decimal_places BETWEEN 0 AND 2`) plus `ge=0, le=2` on the
+  currency API. A zero-decimal currency such as JPY is stored as
+  `150123.00`.
+- **Refused, never rounded, at every write boundary:**
+  `TreasuryTransaction.transaction_amount` and
+  `BankStatementTransaction.amount` carry a model-level backstop
+  (`app/core/monetary.py`); `POST /transactions` rejects >2 decimals
+  (422); the `BANK_TRANSACTIONS` and `BANK_STATEMENT` Excel templates
+  reject a >2-decimal amount (and statement balance) as row error
+  `AMOUNT_PRECISION_EXCEEDED`. `100.250` is accepted (same value as
+  `100.25`).
+- **Migration `4792dd5b9d52`** adds the CHECK only. A pre-flight raises an
+  explicit error, and changes nothing, if an existing currency already
+  declares more than 2 places. Downgrade just drops the constraint and is
+  non-destructive. Verified on real PostgreSQL against existing data
+  (ledger checksum identical before upgrade, after upgrade, and after a
+  downgrade/re-upgrade cycle).
+- `convert_fx_amount` remains a general helper (tested at 0, 2, 3 and 4
+  places) but the configurable range means FX conversion only ever targets
+  0-2 places. If the platform later needs 3+ decimal currencies, that is a
+  deliberate, system-wide change (columns, engines, API scale, imports),
+  not something to be slipped into reconciliation.
 
 ## 8. FX match decision
 

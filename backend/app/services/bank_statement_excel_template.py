@@ -23,6 +23,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.monetary import has_excess_precision
 from app.models.bank_statement import (
     BankStatementEntryType,
     BankStatementTransaction,
@@ -197,6 +198,15 @@ async def _validate_bank_statement_row(row: dict, db: AsyncSession) -> list:
     if amount is None or amount <= 0:
         issues.append(RowIssue("Amount", row.get("Amount"), "ERROR", "INVALID_AMOUNT",
                                 "Amount is required and must be a positive number."))
+    elif has_excess_precision(amount):
+        issues.append(RowIssue("Amount", row.get("Amount"), "ERROR", "AMOUNT_PRECISION_EXCEEDED",
+                                "Amount has more than 2 decimal places; persisted monetary precision "
+                                "is 2 and it would be silently rounded."))
+    balance_value = _parse_decimal(row.get("Balance"))
+    if balance_value is not None and has_excess_precision(balance_value):
+        issues.append(RowIssue("Balance", row.get("Balance"), "ERROR", "AMOUNT_PRECISION_EXCEEDED",
+                                "Balance has more than 2 decimal places; persisted monetary precision "
+                                "is 2 and it would be silently rounded."))
 
     currency = row.get("Currency")
     if not currency or not await _currency_exists(db, str(currency)):

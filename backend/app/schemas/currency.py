@@ -11,7 +11,9 @@ class CurrencyCreate(BaseModel):
     code: str = Field(min_length=3, max_length=3)
     name: str
     symbol: str | None = None
-    decimal_places: int = 2
+    # Persisted monetary precision is two decimals system-wide (app/core/monetary.py), so a
+    # currency may not declare more than the ledger can hold.
+    decimal_places: int = Field(default=2, ge=0, le=2)
     is_base_currency: bool = False
 
 

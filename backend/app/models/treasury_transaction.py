@@ -22,8 +22,9 @@ from enum import Enum
 
 from sqlalchemy import Date, ForeignKey, Numeric, String
 from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, validates
 
+from app.core.monetary import assert_persistable_amount
 from app.db.base_class import Base, TimestampMixin, UUIDPKMixin
 from app.models.lookup import CashDirection
 
@@ -114,3 +115,9 @@ class TreasuryTransaction(Base, UUIDPKMixin, TimestampMixin):
     updated_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id"), nullable=True
     )
+
+    @validates("transaction_amount")
+    def _refuse_unsupported_precision(self, key, value):
+        # Backstop for any code path that bypasses boundary validation: PostgreSQL would
+        # otherwise silently round into Numeric(20,2). See app/core/monetary.py.
+        return assert_persistable_amount(value, key)

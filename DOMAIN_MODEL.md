@@ -76,7 +76,7 @@ Master/configuration data — not hard-coded, not an enum.
 | code | string(3) PK | ISO 4217, e.g. `USD` |
 | name | string | |
 | symbol | string(5), nullable | |
-| decimal_places | int, default 2 | |
+| decimal_places | int, default 2, CHECK 0-2 | Persisted monetary precision is 2 decimals system-wide (see docs/STAGE_5D_ADVANCED_MATCHING.md section 7a) |
 | is_base_currency | bool | usable as a Group reporting currency |
 | is_active / deactivated_at | soft delete | |
 | created_at / updated_at | timestamps | |
