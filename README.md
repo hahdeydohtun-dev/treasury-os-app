@@ -16,7 +16,12 @@ Multi-entity, multi-currency Treasury Management System.
 | Stage 5A — Bank Statement Ingestion & Normalization | Complete |
 | Stage 5B — Reconciliation Data Model | Complete |
 | Stage 5C — Deterministic Bank Reconciliation Matching Engine | Complete |
-| Stage 5D — Advanced Matching (one-to-many, batch, internal transfer, FX) | **Not Started** |
+| Stage 5D — Advanced Matching (one-to-many, batch, internal transfer, FX) | Complete |
+| Stage 5E — Open-Item Workflow | **Not Started** |
+| Stage 5F — Reconciliation Reports | **Not Started** |
+| Stage 5G — Adaptive Matching | **Not Started** |
+| Stage 5H — Full Reconciliation Frontend | **Not Started** |
+| Stage 5I — Final Hardening | **Not Started** |
 | Stage 5E — Open-Item Workflow | **Not Started** |
 | Stage 5F — Reconciliation Reports | **Not Started** |
 | Stage 5G — Adaptive Matching | **Not Started** |
@@ -169,11 +174,14 @@ Run tests:
 pytest -q
 ```
 
-243 tests across Stage 0-5C (facilities, funding actions, forecast
+296 tests across Stage 0-5D (facilities, funding actions, forecast
 engine, security/RBAC hardening, Excel Data Hub, investments, Stage
 3/4 financial-integrity/concurrency hardening passes, bank statement
-ingestion, the reconciliation data model, and the deterministic
-matching engine) - all passing as of this stage.
+ingestion, the reconciliation data model, the deterministic matching
+engine, and advanced grouped/FX matching) - all passing as of this
+stage. Run `pytest --collect-only -q` for the exact current collected
+count rather than relying on this figure, which is a point-in-time
+snapshot.
 
 ## 3. Frontend setup
 
@@ -267,24 +275,25 @@ tagged `source_type="DEMO_DATA"` — never presented as real financial data.
 ## What's NOT implemented yet
 
 Bank reconciliation ADVANCED matching (one-to-many, many-to-one, batch
-payments, internal transfers, FX matching, adaptive learning), open-item
-workflow, reconciliation reports, intercompany reconciliation, working
-capital, KPIs/reports beyond what's listed in each stage's own doc,
-tasks/workflow, and the AI Treasury Copilot are out of scope — see
-`DEVELOPMENT_ROADMAP.md` for the planned build order. Stage 5A (Bank
-Statement Ingestion & Normalization), Stage 5B (Reconciliation Data
-Model — `ReconciliationRun`/`ReconciliationConfiguration`, run creation
-and a row-locked execution boundary), and Stage 5C (a deterministic,
-one-to-one matching engine — candidate generation, fixed-point scoring,
-EXACT/TOLERANCE match types, ambiguous-tie handling that never
-arbitrarily picks a winner) are all complete — see
+Adaptive learning/AI matching, open-item workflow, reconciliation
+reports, intercompany reconciliation, working capital, KPIs/reports
+beyond what's listed in each stage's own doc, tasks/workflow, and the AI
+Treasury Copilot are out of scope — see `DEVELOPMENT_ROADMAP.md` for the
+planned build order. Stage 5A (Bank Statement Ingestion &
+Normalization), Stage 5B (Reconciliation Data Model), Stage 5C (a
+deterministic one-to-one matching engine), and Stage 5D (advanced
+grouped matching — one-to-many, many-to-one, batch payments, internal
+transfers, and evidence-based FX matching with full rate-selection
+provenance) are all complete — see
 `docs/STAGE_5A_BANK_STATEMENT_INGESTION.md`,
-`docs/STAGE_5B_RECONCILIATION_DATA_MODEL.md`, and
-`docs/STAGE_5C_DETERMINISTIC_MATCHING_ENGINE.md`. Executing a
-reconciliation run now produces real `ReconciliationMatchSuggestion`
-rows against `TreasuryTransaction`, but nothing yet turns those
-suggestions into a human workflow, a report, or a learned/adaptive
-process; that begins at Stage 5D. Each completed stage's own
+`docs/STAGE_5B_RECONCILIATION_DATA_MODEL.md`,
+`docs/STAGE_5C_DETERMINISTIC_MATCHING_ENGINE.md`, and
+`docs/STAGE_5D_ADVANCED_MATCHING.md`. Executing a reconciliation run now
+produces real `ReconciliationMatchSuggestion` rows (one-to-one) and
+`ReconciliationMatchGroup` rows (advanced grouped matches) against
+`TreasuryTransaction`, but nothing yet turns those into a human
+workflow, a report, or a learned/adaptive process; that begins at Stage
+5E. Each completed stage's own
 `docs/STAGE_N_*.md`
 lists that stage's specific known limitations in detail (e.g. investment
 periodic-interest forecast SCHEDULES are implemented for MONTHLY/

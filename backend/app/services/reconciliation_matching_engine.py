@@ -26,7 +26,7 @@ from decimal import Decimal
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.bank_statement import BankStatementTransaction
+from app.models.bank_statement import BankStatementTransaction, BankStatementTransactionStatus
 from app.models.reconciliation import (
     MatchSuggestionStatus,
     MatchType,
@@ -226,19 +226,25 @@ async def run_matching_for_run(
     period_start: datetime.date, period_end: datetime.date, configuration: ReconciliationConfiguration | None,
 ) -> MatchingRunResult:
     """
-    Processes every BankStatementTransaction in the run's own scope
-    (SECTION 5/18) - the exact same scope
-    execute_reconciliation_run's own counting query already uses. Claimed
-    treasury-transaction IDs (SECTION 39) are computed ONCE up front and
-    updated as suggestions are added within this pass, so two bank
-    transactions in the SAME run can never both claim the same
-    TreasuryTransaction as their top candidate.
+    Processes every ACTIVE BankStatementTransaction in the run's own
+    scope (SECTION 5/18) - the exact same scope
+    execute_reconciliation_run's own counting query already uses,
+    including the identical ACTIVE-only filter (ISSUE A, Stage 5C final
+    integrity hardening): a REVERSED bank statement transaction must
+    never reach run_matching_for_bank_transaction, so it can never
+    generate a candidate, a suggestion, or contribute to any run summary
+    count, through this or any other route. Claimed treasury-transaction
+    IDs (SECTION 39) are computed ONCE up front and updated as
+    suggestions are added within this pass, so two bank transactions in
+    the SAME run can never both claim the same TreasuryTransaction as
+    their top candidate.
     """
     bank_txns_stmt = select(BankStatementTransaction).where(
         BankStatementTransaction.legal_entity_id == legal_entity_id,
         BankStatementTransaction.bank_account_id == bank_account_id,
         BankStatementTransaction.transaction_date >= period_start,
         BankStatementTransaction.transaction_date <= period_end,
+        BankStatementTransaction.status == BankStatementTransactionStatus.ACTIVE,
     ).order_by(BankStatementTransaction.transaction_date, BankStatementTransaction.id)
     bank_txns = list((await db.execute(bank_txns_stmt)).scalars().all())
 

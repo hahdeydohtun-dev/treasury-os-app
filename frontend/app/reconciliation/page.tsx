@@ -103,9 +103,13 @@ export default function ReconciliationPage() {
       <h1>Reconciliation</h1>
       <p style={{ color: "var(--color-text-muted)" }}>
         A reconciliation run defines a scoped reconciliation job (entity, bank account,
-        period) and tracks its own lifecycle. Stage 5B provides the run and configuration
-        infrastructure only - no matching engine exists yet, so an executed run simply
-        counts the bank statement evidence in its own scope. See{" "}
+        period) and tracks its own lifecycle. Stage 5C provides deterministic one-to-one
+        bank-to-ledger matching, and Stage 5D extends this with advanced grouped matching:
+        one-to-many, many-to-one, batch payments (evidenced by a shared reference), internal
+        transfers (recognized via the ledger&apos;s own transfer linkage), and evidence-based
+        FX matching using authoritative exchange rates - never guessed or inverted. Ambiguous
+        groupings are never resolved arbitrarily; every competing candidate is shown. Open-item
+        workflow, reporting, and adaptive learning are introduced in later stages. See{" "}
         <Link href="/bank-statements" style={{ color: "var(--color-accent)" }}>
           Bank Statements
         </Link>{" "}
@@ -150,6 +154,8 @@ export default function ReconciliationPage() {
               <th style={{ padding: "6px 8px" }}>Matched</th>
               <th style={{ padding: "6px 8px" }}>Ambiguous</th>
               <th style={{ padding: "6px 8px" }}>Unmatched</th>
+              <th style={{ padding: "6px 8px" }}>Advanced Groups</th>
+              <th style={{ padding: "6px 8px" }}>Ambiguous Groups</th>
               <th style={{ padding: "6px 8px" }}>Actions</th>
             </tr>
           </thead>
@@ -162,6 +168,8 @@ export default function ReconciliationPage() {
                 <td style={{ padding: "6px 8px" }}>{run.matched_count}</td>
                 <td style={{ padding: "6px 8px" }}>{run.ambiguous_count}</td>
                 <td style={{ padding: "6px 8px" }}>{run.unmatched_count}</td>
+                <td style={{ padding: "6px 8px" }}>{run.advanced_match_count}</td>
+                <td style={{ padding: "6px 8px" }}>{run.ambiguous_advanced_count}</td>
                 <td style={{ padding: "6px 8px" }}>
                   {run.status === "READY" && (
                     <>
@@ -174,7 +182,7 @@ export default function ReconciliationPage() {
             ))}
             {runs.length === 0 && !loading && (
               <tr>
-                <td colSpan={7} style={{ padding: "12px 8px", color: "var(--color-text-muted)" }}>
+                <td colSpan={9} style={{ padding: "12px 8px", color: "var(--color-text-muted)" }}>
                   No reconciliation runs yet.
                 </td>
               </tr>

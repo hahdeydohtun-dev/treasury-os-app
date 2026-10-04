@@ -79,11 +79,15 @@ from app.models.bank_statement import (  # noqa: F401
 )
 from app.models.reconciliation import (  # noqa: F401
     RECONCILIATION_RUN_STATUS_TRANSITIONS,
+    MatchGroupStatus,
+    MatchRelationshipType,
     MatchSuggestionStatus,
     MatchType,
     OpenItemCategory,
     OpenItemStatus,
     ReconciliationConfiguration,
+    ReconciliationMatchGroup,
+    ReconciliationMatchGroupMember,
     ReconciliationMatchSuggestion,
     ReconciliationOpenItem,
     ReconciliationRun,

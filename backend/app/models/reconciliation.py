@@ -32,9 +32,18 @@ import uuid
 from decimal import Decimal
 from enum import Enum
 
-from sqlalchemy import Date, DateTime, ForeignKey, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import (
+    CheckConstraint,
+    Date,
+    DateTime,
+    ForeignKey,
+    Numeric,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.dialects.postgresql import JSONB, UUID
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base_class import Base, TimestampMixin, UUIDPKMixin
 
@@ -140,6 +149,24 @@ class ReconciliationRun(Base, UUIDPKMixin, TimestampMixin):
     # them, even before opening any individual suggestion.
     matching_rule_version: Mapped[str | None] = mapped_column(String(50), nullable=True)
 
+    # SECTION 26 (Stage 5D): advanced-match run summary counters, additive
+    # and backward-compatible - existing Stage 5C counts
+    # (statement_transaction_count/eligible_transaction_count/
+    # candidate_count/suggestion_count/matched_count/ambiguous_count/
+    # unmatched_count) keep their exact prior meaning unchanged.
+    # `matched_count` IS Stage 5C's own one-to-one match count (no
+    # separate "one_to_one_match_count" column was added - reusing the
+    # existing name per the task's own "or use the repository's existing
+    # naming conventions" allowance). `advanced_match_count` counts
+    # Stage 5D match GROUPS (ONE_TO_MANY/MANY_TO_ONE/BATCH/
+    # INTERNAL_TRANSFER/FX_MATCH) with status PENDING (i.e. proposed,
+    # unambiguous); `ambiguous_advanced_count` counts bank/ledger
+    # transactions for which Stage 5D found 2+ competing advanced
+    # candidate groupings and deliberately made no automatic selection
+    # (SECTION 18).
+    advanced_match_count: Mapped[int] = mapped_column(default=0, nullable=False)
+    ambiguous_advanced_count: Mapped[int] = mapped_column(default=0, nullable=False)
+
     created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id"), nullable=True
     )
@@ -148,6 +175,137 @@ class ReconciliationRun(Base, UUIDPKMixin, TimestampMixin):
     )
     started_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class MatchRelationshipType(str, Enum):
+    """
+    SECTION 6/7 (Stage 5D): the cardinality/relationship a
+    ReconciliationMatchGroup proposes. Deliberately excludes an
+    unrestricted MANY_TO_MANY value - SECTION 7 is explicit that Stage
+    5D never performs unrestricted many-to-many matching; a situation
+    that would require it surfaces as AMBIGUOUS competing groups instead
+    (MatchGroupStatus.AMBIGUOUS), never as a new relationship type.
+    """
+    ONE_TO_MANY = "ONE_TO_MANY"
+    MANY_TO_ONE = "MANY_TO_ONE"
+    BATCH = "BATCH"
+    INTERNAL_TRANSFER = "INTERNAL_TRANSFER"
+    FX_MATCH = "FX_MATCH"
+
+
+class MatchGroupStatus(str, Enum):
+    """
+    SECTION 18/24: PENDING is the only status Stage 5D itself ever sets
+    for a genuinely proposed, unambiguous group. AMBIGUOUS marks 2+
+    competing groups where no automatic selection was made - Stage 5D
+    persists every competing candidate as its own AMBIGUOUS row rather
+    than picking one. ACCEPTED/REJECTED are reserved for a future
+    workflow stage (Stage 5E) - no Stage 5D code path ever sets them.
+    """
+    PENDING = "PENDING"
+    AMBIGUOUS = "AMBIGUOUS"
+    ACCEPTED = "ACCEPTED"
+    REJECTED = "REJECTED"
+
+
+class ReconciliationMatchGroup(Base, UUIDPKMixin, TimestampMixin):
+    """
+    SECTION 6 (Stage 5D): a proposed grouped relationship between one or
+    more BankStatementTransaction rows and one or more TreasuryTransaction
+    rows - member rows live in `ReconciliationMatchGroupMember`, never
+    inline here, so the group itself stays a fixed-shape record
+    regardless of how many members it has. A group NEVER creates,
+    modifies, or deletes any TreasuryTransaction/BankStatementTransaction
+    - it only describes a relationship among EXISTING evidence (SECTION
+    5). `group_key` backs the idempotency guarantee (SECTION 21): a
+    deterministic string built from
+    (relationship_type, sorted bank member IDs, sorted ledger member IDs)
+    - see reconciliation_advanced_matching.py::compute_group_key - with a
+    database-level unique constraint on (reconciliation_run_id,
+    group_key), so re-running the same run's advanced-matching pass can
+    never persist the same group twice.
+    """
+    __tablename__ = "reconciliation_match_groups"
+    __table_args__ = (
+        UniqueConstraint("reconciliation_run_id", "group_key", name="uq_reconciliation_match_group_identity"),
+    )
+
+    reconciliation_run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("reconciliation_runs.id"), nullable=False, index=True
+    )
+    relationship_type: Mapped[MatchRelationshipType] = mapped_column(nullable=False, index=True)
+    status: Mapped[MatchGroupStatus] = mapped_column(default=MatchGroupStatus.PENDING, nullable=False, index=True)
+
+    bank_aggregate_amount: Mapped[Decimal] = mapped_column(Numeric(20, 2), nullable=False)
+    ledger_aggregate_amount: Mapped[Decimal] = mapped_column(Numeric(20, 2), nullable=False)
+    currency_code: Mapped[str] = mapped_column(String(3), nullable=False)
+    difference: Mapped[Decimal] = mapped_column(Numeric(20, 2), nullable=False)
+
+    # FX evidence (SECTION 16) - all nullable, populated only for
+    # relationship_type == FX_MATCH; every other relationship type
+    # leaves these null (same currency on both sides, no conversion).
+    # SECTION 16A.8 (FX rate selection hardening): a reference to the
+    # authoritative FXRate row is stored (`fx_rate_id`), not merely its
+    # numeric value, so the conversion remains reproducible even if that
+    # rate is later superseded (SECTION 16A.9) - `fx_rate`/`fx_rate_date`
+    # are still stored directly too, as a denormalized convenience/
+    # historical snapshot, but `fx_rate_id` is the authoritative
+    # provenance link. `fx_rate_type`/`fx_rate_source` record which rate
+    # TYPE and SOURCE were actually used, and `fx_tolerance_pct` records
+    # the tolerance actually applied, so the whole conversion decision is
+    # reconstructable from this row alone.
+    fx_source_currency_code: Mapped[str | None] = mapped_column(String(3), nullable=True)
+    fx_target_currency_code: Mapped[str | None] = mapped_column(String(3), nullable=True)
+    fx_rate: Mapped[Decimal | None] = mapped_column(Numeric(20, 10), nullable=True)
+    fx_rate_date: Mapped[datetime.date | None] = mapped_column(Date, nullable=True)
+    fx_rate_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("fx_rates.id"), nullable=True)
+    fx_rate_type: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    fx_rate_source: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    fx_tolerance_pct: Mapped[Decimal | None] = mapped_column(Numeric(6, 3), nullable=True)
+
+    score: Mapped[Decimal] = mapped_column(Numeric(6, 3), nullable=False)
+    confidence: Mapped[Decimal] = mapped_column(Numeric(6, 3), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    matching_rule_version: Mapped[str] = mapped_column(String(50), nullable=False)
+
+    group_key: Mapped[str] = mapped_column(String(255), nullable=False)
+
+    members: Mapped[list["ReconciliationMatchGroupMember"]] = relationship(
+        back_populates="match_group", cascade="all, delete-orphan",
+    )
+
+
+class ReconciliationMatchGroupMember(Base, UUIDPKMixin, TimestampMixin):
+    """
+    One member of a ReconciliationMatchGroup - exactly one of
+    `bank_statement_transaction_id`/`treasury_transaction_id` is set
+    (enforced by `ck_reconciliation_match_group_member_exactly_one_side`),
+    never both and never neither, so a member row is unambiguously
+    "a bank-side participant" or "a ledger-side participant." A group's
+    full membership is the set of its member rows - source records are
+    never merged, copied, or destroyed (SECTION 12 of the Stage 5D spec:
+    "never merge or destroy the source records," carried over from the
+    original forensic report's own one-to-many/many-to-one design).
+    """
+    __tablename__ = "reconciliation_match_group_members"
+    __table_args__ = (
+        CheckConstraint(
+            "(bank_statement_transaction_id IS NOT NULL)::int + (treasury_transaction_id IS NOT NULL)::int = 1",
+            name="ck_reconciliation_match_group_member_exactly_one_side",
+        ),
+    )
+
+    match_group_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("reconciliation_match_groups.id"), nullable=False, index=True
+    )
+    bank_statement_transaction_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("bank_statement_transactions.id"), nullable=True, index=True
+    )
+    treasury_transaction_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("treasury_transactions.id"), nullable=True, index=True
+    )
+
+    match_group: Mapped["ReconciliationMatchGroup"] = relationship(back_populates="members")
 
 
 class MatchSuggestionStatus(str, Enum):

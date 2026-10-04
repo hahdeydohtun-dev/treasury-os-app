@@ -262,6 +262,8 @@ export const api = {
     request<ReconciliationRunOut>(`/reconciliation/runs/${id}/execute`, { method: "POST" }, token),
   cancelReconciliationRun: (token: string, id: string) =>
     request<ReconciliationRunOut>(`/reconciliation/runs/${id}/cancel`, { method: "POST" }, token),
+  listReconciliationMatchGroups: (token: string, runId: string) =>
+    request<ReconciliationMatchGroupOut[]>(`/reconciliation/runs/${runId}/match-groups`, {}, token),
   listReconciliationConfigurations: (token: string, params?: Record<string, string>) =>
     request<ReconciliationConfigurationOut[]>(
       `/reconciliation/configurations${params ? "?" + new URLSearchParams(params) : ""}`, {}, token
@@ -665,11 +667,43 @@ export interface ReconciliationRunOut {
   matched_count: number;
   ambiguous_count: number;
   unmatched_count: number;
+  advanced_match_count: number;
+  ambiguous_advanced_count: number;
   matching_rule_version: string | null;
   notes: string | null;
   failure_reason: string | null;
   started_at: string | null;
   completed_at: string | null;
+}
+
+export interface ReconciliationMatchGroupMemberOut {
+  id: string;
+  bank_statement_transaction_id: string | null;
+  treasury_transaction_id: string | null;
+}
+
+export interface ReconciliationMatchGroupOut {
+  id: string;
+  reconciliation_run_id: string;
+  relationship_type: "ONE_TO_MANY" | "MANY_TO_ONE" | "BATCH" | "INTERNAL_TRANSFER" | "FX_MATCH";
+  status: "PENDING" | "AMBIGUOUS" | "ACCEPTED" | "REJECTED";
+  bank_aggregate_amount: string;
+  ledger_aggregate_amount: string;
+  currency_code: string;
+  difference: string;
+  fx_source_currency_code: string | null;
+  fx_target_currency_code: string | null;
+  fx_rate: string | null;
+  fx_rate_date: string | null;
+  fx_rate_id: string | null;
+  fx_rate_type: string | null;
+  fx_rate_source: string | null;
+  fx_tolerance_pct: string | null;
+  score: string;
+  confidence: string;
+  reason: string;
+  matching_rule_version: string;
+  members: ReconciliationMatchGroupMemberOut[];
 }
 
 export interface ReconciliationConfigurationOut {

@@ -371,10 +371,43 @@ explicitly deferred. See
       normalization units, candidate-generation performance) — full
       suite (Stage 0-5C) at 243/243
 
-### Stage 5D onward (not started)
+### Stage 5D — Advanced Bank Reconciliation Matching (delivered)
 
-- Advanced matching: one-to-many, many-to-one, batch payments, internal
-  transfers, FX-aware matching (Stage 5D)
+Bounded, deterministic advanced matching built on top of Stage 5C
+(unchanged) — one-to-many, many-to-one, batch payments (evidenced by a
+shared reference/keyword), internal transfers (via the existing
+`transfer_pair_id`), and evidence-based FX matching with full
+rate-selection provenance (rate type, effective date, staleness,
+source, no inversion/triangulation). See
+`docs/STAGE_5D_ADVANCED_MATCHING.md` for full detail.
+
+- [x] Reference-driven grouping only — never amount-only inference;
+      bounded "full-set then drop-one" search, never a combinatorial
+      subset search
+- [x] Genuine ambiguity (2+ valid competing groupings) persists every
+      candidate rather than arbitrarily choosing one
+- [x] `select_fx_rate` — deterministic rate-type selection, correct
+      future-rate rejection, optional staleness limits, full provenance
+      (`fx_rate_id`/`fx_rate_type`/`fx_rate_source`/`fx_tolerance_pct`),
+      historical reproducibility verified (a newer rate never changes
+      an already-created match's stored rate reference)
+- [x] Two genuine bugs found and fixed during implementation: an
+      amount-attribute mismatch between bank/ledger candidate types in
+      the shared summing-search helper, and a cross-phase claim leak
+      where an earlier Stage 5D phase's claim wasn't visible to a later
+      phase in the same pass
+- [x] Zero financial side effects, full entity/currency isolation,
+      same-run and cross-run-scope concurrency protections reused
+      unchanged from Stage 5C
+- [x] 43 new tests (one-to-many, many-to-one, batch vs. amount-only
+      coincidence, internal transfer, 6 FX scenarios, ambiguity, claim
+      protection, entity/currency isolation, direction, date bounds,
+      amount tolerance, ACTIVE/REVERSED, idempotency, financial
+      integrity, bounded-candidate-pool performance, and 14 dedicated
+      FX rate-selection tests) — full suite (Stage 0-5D) at 296/296
+
+### Stage 5E onward (not started)
+
 - Open-items-first UI (matched transactions available via drill-down only)
 - Assignment/investigation/comment/resolution/approval/closure workflow
 

@@ -5,6 +5,8 @@ from decimal import Decimal
 from pydantic import BaseModel
 
 from app.models.reconciliation import (
+    MatchGroupStatus,
+    MatchRelationshipType,
     MatchSuggestionStatus,
     MatchType,
     OpenItemCategory,
@@ -41,6 +43,8 @@ class ReconciliationRunOut(BaseModel):
     matched_count: int
     ambiguous_count: int
     unmatched_count: int
+    advanced_match_count: int
+    ambiguous_advanced_count: int
     matching_rule_version: str | None
     notes: str | None
     failure_reason: str | None
@@ -60,6 +64,40 @@ class ReconciliationMatchSuggestionOut(BaseModel):
     status: MatchSuggestionStatus
     reason: str | None
     matching_rule_version: str | None
+
+    model_config = {"from_attributes": True}
+
+
+class ReconciliationMatchGroupMemberOut(BaseModel):
+    id: uuid.UUID
+    bank_statement_transaction_id: uuid.UUID | None
+    treasury_transaction_id: uuid.UUID | None
+
+    model_config = {"from_attributes": True}
+
+
+class ReconciliationMatchGroupOut(BaseModel):
+    id: uuid.UUID
+    reconciliation_run_id: uuid.UUID
+    relationship_type: MatchRelationshipType
+    status: MatchGroupStatus
+    bank_aggregate_amount: Decimal
+    ledger_aggregate_amount: Decimal
+    currency_code: str
+    difference: Decimal
+    fx_source_currency_code: str | None
+    fx_target_currency_code: str | None
+    fx_rate: Decimal | None
+    fx_rate_date: datetime.date | None
+    fx_rate_id: uuid.UUID | None
+    fx_rate_type: str | None
+    fx_rate_source: str | None
+    fx_tolerance_pct: Decimal | None
+    score: Decimal
+    confidence: Decimal
+    reason: str
+    matching_rule_version: str
+    members: list[ReconciliationMatchGroupMemberOut] = []
 
     model_config = {"from_attributes": True}
 

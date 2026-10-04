@@ -11,6 +11,7 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.auth.authorization import (
     apply_resolved_entity_scope,
@@ -24,6 +25,7 @@ from app.models.banking import BankAccount
 from app.models.rbac import TreasuryAction, TreasuryModule, User
 from app.models.reconciliation import (
     ReconciliationConfiguration,
+    ReconciliationMatchGroup,
     ReconciliationMatchSuggestion,
     ReconciliationOpenItem,
     ReconciliationRun,
@@ -32,6 +34,7 @@ from app.models.reconciliation import (
 from app.schemas.reconciliation import (
     ReconciliationConfigurationCreate,
     ReconciliationConfigurationOut,
+    ReconciliationMatchGroupOut,
     ReconciliationMatchSuggestionOut,
     ReconciliationOpenItemOut,
     ReconciliationRunCreate,
@@ -298,6 +301,27 @@ async def list_run_suggestions(
     await assert_entity_access(db, user, MODULE, TreasuryAction.VIEW, run.legal_entity_id)
     result = await db.execute(
         select(ReconciliationMatchSuggestion).where(ReconciliationMatchSuggestion.reconciliation_run_id == run_id)
+    )
+    return list(result.scalars().all())
+
+
+@router.get("/runs/{run_id}/match-groups", response_model=list[ReconciliationMatchGroupOut])
+async def list_run_match_groups(
+    run_id: uuid.UUID, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user),
+) -> list:
+    """
+    SECTION 25/35 (Stage 5D): a minimal, read-only endpoint for
+    inspecting advanced match groups - deliberately not a Stage 5H
+    workspace. Entity-scoped exactly like every other run-scoped
+    endpoint; members are eager-loaded so the response is self-
+    contained without a second round trip per group.
+    """
+    run = await _get_run_or_404(db, run_id)
+    await assert_entity_access(db, user, MODULE, TreasuryAction.VIEW, run.legal_entity_id)
+    result = await db.execute(
+        select(ReconciliationMatchGroup)
+        .options(selectinload(ReconciliationMatchGroup.members))
+        .where(ReconciliationMatchGroup.reconciliation_run_id == run_id)
     )
     return list(result.scalars().all())
 

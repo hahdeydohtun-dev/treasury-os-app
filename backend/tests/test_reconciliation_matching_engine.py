@@ -1261,3 +1261,279 @@ async def test_cross_group_claimed_transactions_never_leak(
     claimed_for_a = await already_claimed_treasury_transaction_ids(db_session, entity_a.id)
     assert claimed_for_a == {ledger_a.id}
     assert ledger_c.id not in claimed_for_a  # a different group entirely must never leak in
+
+
+# ---------------------------------------------------------------------------
+# Stage 5C final integrity hardening: ISSUE A - ACTIVE bank evidence only
+# ---------------------------------------------------------------------------
+
+async def test_active_transaction_can_participate_reversed_cannot(
+    client: AsyncClient, db_session: AsyncSession, demo_group_and_entities, cash_event_types,
+):
+    """Test A1: an ACTIVE and a REVERSED bank transaction, otherwise identical, are treated differently."""
+    from app.models.bank_statement import BankStatementTransactionStatus
+    from app.models.rbac import EntityScopeType
+
+    group, entity_a, _ = demo_group_and_entities
+    bank = await _make_bank(db_session)
+    account = await _make_account(db_session, entity_a.id, bank.id, account_number="5555000011")
+    user = await _make_scoped_user(
+        db_session, scope_type=EntityScopeType.ENTITY, legal_entity_id=entity_a.id, label="activeonly",
+    )
+    await db_session.flush()
+
+    active_txn = await _make_bank_statement_txn(
+        db_session, entity_id=entity_a.id, account_id=account.id, bank_reference="PAY-ACTIVE",
+    )
+    reversed_txn = await _make_bank_statement_txn(
+        db_session, entity_id=entity_a.id, account_id=account.id, bank_reference="PAY-REVERSED",
+        row_number=3,
+    )
+    reversed_txn.status = BankStatementTransactionStatus.REVERSED
+
+    await _make_treasury_txn(
+        db_session, entity_id=entity_a.id, account_id=account.id, direction="INFLOW", reference="PAY-ACTIVE",
+    )
+    await _make_treasury_txn(
+        db_session, entity_id=entity_a.id, account_id=account.id, direction="INFLOW", reference="PAY-REVERSED",
+    )
+    await db_session.commit()
+    headers = {"Authorization": f"Bearer {await _login(client, user)}"}
+
+    run_id = await _create_ready_run(client, headers, entity_a.id, account.id)
+    execute_resp = await client.post(f"/api/v1/reconciliation/runs/{run_id}/execute", headers=headers)
+    assert execute_resp.status_code == 200
+
+    suggestions = await _get_suggestions(client, headers, run_id)
+    bank_txn_ids_in_suggestions = {s["bank_statement_transaction_id"] for s in suggestions}
+    assert str(active_txn.id) in bank_txn_ids_in_suggestions
+    assert str(reversed_txn.id) not in bank_txn_ids_in_suggestions
+
+
+async def test_reversed_transaction_creates_zero_suggestions(
+    client: AsyncClient, db_session: AsyncSession, demo_group_and_entities, cash_event_types,
+):
+    """Test A2: a REVERSED bank transaction (with no ACTIVE counterpart) creates zero suggestions for itself."""
+    from app.models.bank_statement import BankStatementTransactionStatus
+    from app.models.rbac import EntityScopeType
+
+    group, entity_a, _ = demo_group_and_entities
+    bank = await _make_bank(db_session)
+    account = await _make_account(db_session, entity_a.id, bank.id, account_number="5555000022")
+    user = await _make_scoped_user(
+        db_session, scope_type=EntityScopeType.ENTITY, legal_entity_id=entity_a.id, label="reversednone",
+    )
+    await db_session.flush()
+
+    reversed_txn = await _make_bank_statement_txn(
+        db_session, entity_id=entity_a.id, account_id=account.id, bank_reference="PAY-REVERSED-ONLY",
+    )
+    reversed_txn.status = BankStatementTransactionStatus.REVERSED
+    await _make_treasury_txn(
+        db_session, entity_id=entity_a.id, account_id=account.id, direction="INFLOW",
+        reference="PAY-REVERSED-ONLY",
+    )
+    await db_session.commit()
+    headers = {"Authorization": f"Bearer {await _login(client, user)}"}
+
+    run_id = await _create_ready_run(client, headers, entity_a.id, account.id)
+    execute_resp = await client.post(f"/api/v1/reconciliation/runs/{run_id}/execute", headers=headers)
+    assert execute_resp.status_code == 200
+
+    suggestions = await _get_suggestions(client, headers, run_id)
+    assert len(suggestions) == 0  # the reversed transaction is invisible to the engine entirely
+
+
+async def test_reversed_transaction_does_not_inflate_run_counts(
+    client: AsyncClient, db_session: AsyncSession, demo_group_and_entities, cash_event_types,
+):
+    """Test A3: run summary counts reflect ACTIVE transactions only."""
+    from app.models.bank_statement import BankStatementTransactionStatus
+    from app.models.rbac import EntityScopeType
+
+    group, entity_a, _ = demo_group_and_entities
+    bank = await _make_bank(db_session)
+    account = await _make_account(db_session, entity_a.id, bank.id, account_number="5555000033")
+    user = await _make_scoped_user(
+        db_session, scope_type=EntityScopeType.ENTITY, legal_entity_id=entity_a.id, label="countsactive",
+    )
+    await db_session.flush()
+
+    await _make_bank_statement_txn(
+        db_session, entity_id=entity_a.id, account_id=account.id, bank_reference="PAY-COUNT-ACTIVE",
+    )
+    reversed_txn = await _make_bank_statement_txn(
+        db_session, entity_id=entity_a.id, account_id=account.id, bank_reference="PAY-COUNT-REVERSED",
+        row_number=3,
+    )
+    reversed_txn.status = BankStatementTransactionStatus.REVERSED
+    await _make_treasury_txn(
+        db_session, entity_id=entity_a.id, account_id=account.id, direction="INFLOW",
+        reference="PAY-COUNT-ACTIVE",
+    )
+    await db_session.commit()
+    headers = {"Authorization": f"Bearer {await _login(client, user)}"}
+
+    run_id = await _create_ready_run(client, headers, entity_a.id, account.id)
+    execute_resp = await client.post(f"/api/v1/reconciliation/runs/{run_id}/execute", headers=headers)
+    body = execute_resp.json()
+    assert body["statement_transaction_count"] == 1  # only the ACTIVE one
+    assert body["eligible_transaction_count"] == 1
+    assert body["matched_count"] == 1
+    assert body["unmatched_count"] == 0
+
+
+async def test_reversed_transaction_cannot_reach_matching_via_direct_call(
+    db_session: AsyncSession, demo_group_and_entities, cash_event_types,
+):
+    """
+    Test A4: exercises run_matching_for_run directly (not only the
+    top-level run/execute API), proving the ACTIVE filter is applied at
+    the actual bank-transaction-selection query itself, not merely
+    incidentally enforced by some other layer.
+    """
+    from sqlalchemy import select
+
+    from app.models.bank_statement import BankStatementTransactionStatus
+    from app.models.reconciliation import (
+        ReconciliationMatchSuggestion,
+        ReconciliationRun,
+        ReconciliationRunStatus,
+    )
+    from app.services.reconciliation_matching_engine import run_matching_for_run
+
+    group, entity_a, _ = demo_group_and_entities
+    bank = await _make_bank(db_session)
+    account = await _make_account(db_session, entity_a.id, bank.id, account_number="5555000044")
+
+    reversed_txn = await _make_bank_statement_txn(
+        db_session, entity_id=entity_a.id, account_id=account.id, bank_reference="PAY-DIRECT-REVERSED",
+    )
+    reversed_txn.status = BankStatementTransactionStatus.REVERSED
+    await _make_treasury_txn(
+        db_session, entity_id=entity_a.id, account_id=account.id, direction="INFLOW",
+        reference="PAY-DIRECT-REVERSED",
+    )
+    run = ReconciliationRun(
+        legal_entity_id=entity_a.id, bank_account_id=account.id,
+        period_start=datetime.date(2026, 6, 1), period_end=datetime.date(2026, 6, 30),
+        status=ReconciliationRunStatus.RUNNING,
+    )
+    db_session.add(run)
+    await db_session.flush()
+
+    await run_matching_for_run(
+        db_session, run_id=run.id, legal_entity_id=entity_a.id, bank_account_id=account.id,
+        period_start=run.period_start, period_end=run.period_end, configuration=None,
+    )
+
+    result = await db_session.execute(
+        select(ReconciliationMatchSuggestion).where(ReconciliationMatchSuggestion.reconciliation_run_id == run.id)
+    )
+    assert list(result.scalars().all()) == []  # the reversed transaction never entered candidate generation at all
+
+
+# ---------------------------------------------------------------------------
+# Stage 5C final integrity hardening: ISSUE B - cross-run scope concurrency
+# ---------------------------------------------------------------------------
+
+async def test_different_runs_same_scope_cannot_match_concurrently(
+    client: AsyncClient, db_session: AsyncSession, demo_group_and_entities, cash_event_types,
+):
+    """
+    Two DIFFERENT ReconciliationRun rows covering the exact same
+    (entity, account, period) scope must not perform matching
+    concurrently - a genuine asyncio.gather race, not a sequential call.
+    """
+    from sqlalchemy import select
+
+    from app.models.rbac import EntityScopeType
+    from app.models.reconciliation import ReconciliationMatchSuggestion
+
+    group, entity_a, _ = demo_group_and_entities
+    bank = await _make_bank(db_session)
+    account = await _make_account(db_session, entity_a.id, bank.id, account_number="5555000055")
+    user = await _make_scoped_user(
+        db_session, scope_type=EntityScopeType.ENTITY, legal_entity_id=entity_a.id, label="crossrunscope",
+    )
+    await db_session.flush()
+
+    await _make_bank_statement_txn(
+        db_session, entity_id=entity_a.id, account_id=account.id, bank_reference="PAY-CROSSRUN",
+    )
+    await _make_treasury_txn(
+        db_session, entity_id=entity_a.id, account_id=account.id, direction="INFLOW", reference="PAY-CROSSRUN",
+    )
+    await db_session.commit()
+    headers = {"Authorization": f"Bearer {await _login(client, user)}"}
+
+    # Two SEPARATE runs, same exact scope.
+    run_a_id = await _create_ready_run(client, headers, entity_a.id, account.id)
+    run_b_id = await _create_ready_run(client, headers, entity_a.id, account.id)
+
+    results = await asyncio.gather(
+        client.post(f"/api/v1/reconciliation/runs/{run_a_id}/execute", headers=headers),
+        client.post(f"/api/v1/reconciliation/runs/{run_b_id}/execute", headers=headers),
+        return_exceptions=True,
+    )
+    statuses = [r.status_code for r in results if not isinstance(r, Exception)]
+    # Both requests may each complete successfully (Behavior 2 - the
+    # second waits for the scope lock, then proceeds against the
+    # now-updated claimed set) - what must NEVER happen is both
+    # independently claiming the SAME TreasuryTransaction.
+    assert all(s == 200 for s in statuses)
+
+    suggestions_with_real_candidate = await db_session.execute(
+        select(ReconciliationMatchSuggestion).where(
+            ReconciliationMatchSuggestion.treasury_transaction_id.is_not(None),
+        )
+    )
+    real_suggestions = list(suggestions_with_real_candidate.scalars().all())
+    # Exactly one run got the real match; the other correctly saw it
+    # already claimed and produced only a "no candidate" suggestion.
+    assert len(real_suggestions) == 1
+
+    run_ids_with_match = {s.reconciliation_run_id for s in real_suggestions}
+    assert run_ids_with_match.issubset({uuid.UUID(run_a_id), uuid.UUID(run_b_id)})
+
+
+async def test_different_scopes_execute_concurrently_without_unnecessary_serialization(
+    client: AsyncClient, db_session: AsyncSession, demo_group_and_entities, cash_event_types,
+):
+    """Two genuinely independent scopes (different accounts) must both be able to execute - never a global lock."""
+    from app.models.rbac import EntityScopeType
+
+    group, entity_a, _ = demo_group_and_entities
+    bank = await _make_bank(db_session)
+    account_1 = await _make_account(db_session, entity_a.id, bank.id, account_number="5555000066")
+    account_2 = await _make_account(db_session, entity_a.id, bank.id, account_number="5555000077")
+    user = await _make_scoped_user(
+        db_session, scope_type=EntityScopeType.ENTITY, legal_entity_id=entity_a.id, label="independentscopes",
+    )
+    await db_session.flush()
+
+    await _make_bank_statement_txn(
+        db_session, entity_id=entity_a.id, account_id=account_1.id, bank_reference="PAY-SCOPE1",
+    )
+    await _make_treasury_txn(
+        db_session, entity_id=entity_a.id, account_id=account_1.id, direction="INFLOW", reference="PAY-SCOPE1",
+    )
+    await _make_bank_statement_txn(
+        db_session, entity_id=entity_a.id, account_id=account_2.id, bank_reference="PAY-SCOPE2",
+    )
+    await _make_treasury_txn(
+        db_session, entity_id=entity_a.id, account_id=account_2.id, direction="INFLOW", reference="PAY-SCOPE2",
+    )
+    await db_session.commit()
+    headers = {"Authorization": f"Bearer {await _login(client, user)}"}
+
+    run_1_id = await _create_ready_run(client, headers, entity_a.id, account_1.id)
+    run_2_id = await _create_ready_run(client, headers, entity_a.id, account_2.id)
+
+    results = await asyncio.gather(
+        client.post(f"/api/v1/reconciliation/runs/{run_1_id}/execute", headers=headers),
+        client.post(f"/api/v1/reconciliation/runs/{run_2_id}/execute", headers=headers),
+    )
+    assert all(r.status_code == 200 for r in results)
+    assert all(r.json()["status"] == "COMPLETED" for r in results)
+    assert all(r.json()["matched_count"] == 1 for r in results)  # each scope matched its OWN transaction

@@ -15,16 +15,17 @@ import uuid
 from decimal import Decimal
 
 from fastapi import HTTPException
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.bank_statement import BankStatementTransaction
+from app.models.bank_statement import BankStatementTransaction, BankStatementTransactionStatus
 from app.models.reconciliation import (
     RECONCILIATION_RUN_STATUS_TRANSITIONS,
     ReconciliationConfiguration,
     ReconciliationRun,
     ReconciliationRunStatus,
 )
+from app.services.reconciliation_advanced_matching import run_advanced_matching_for_run
 from app.services.reconciliation_matching_engine import run_matching_for_run
 from app.services.reconciliation_scoring import MATCHING_RULE_VERSION
 
@@ -189,6 +190,47 @@ async def transition_run_status(
     return run
 
 
+async def acquire_reconciliation_scope_lock(
+    db: AsyncSession, legal_entity_id: uuid.UUID, bank_account_id: uuid.UUID,
+    period_start: datetime.date, period_end: datetime.date,
+) -> None:
+    """
+    ISSUE B (Stage 5C final integrity hardening): protects DIFFERENT
+    ReconciliationRun rows that happen to cover the exact same
+    reconciliation scope (entity + bank account + period) from matching
+    concurrently - a gap the existing row lock on the run itself
+    (load_run_for_update) cannot close, since two such runs are two
+    different rows and never contend for the same row lock.
+
+    Uses a PostgreSQL transaction-scoped advisory lock
+    (`pg_advisory_xact_lock`), keyed deterministically off the scope
+    tuple via `hashtextextended` (a 64-bit hash, computed by Postgres
+    itself so the same scope always produces the same key regardless of
+    which process computes it) - never an in-process
+    `asyncio.Lock()` (useless across separate workers/processes) and
+    never a naive "check then insert" (a real TOCTOU race). The lock is
+    acquired for the CURRENT transaction only and is released
+    automatically on COMMIT or ROLLBACK - it requires no explicit
+    release call, and cannot be leaked by an exception (SECTION 19: a
+    failed run's transaction still ends, releasing the lock, so a later
+    valid run for the same scope is never permanently blocked).
+
+    A second, concurrent request for the SAME scope (different run ID)
+    blocks here until the first transaction ends (SECTION 10's
+    "Behavior 2") - by the time it proceeds, the first run's suggestions
+    are already committed and visible, so
+    already_claimed_treasury_transaction_ids correctly excludes them
+    from the second run's own candidate pool, preventing any
+    TreasuryTransaction from being consumed by two competing runs.
+
+    Deliberately scoped to exactly (entity, account, period) - never a
+    global lock - so independent scopes (a different account, a
+    different period, or both) are never serialized against each other.
+    """
+    scope_key = f"reconciliation_scope:{legal_entity_id}:{bank_account_id}:{period_start.isoformat()}:{period_end.isoformat()}"
+    await db.execute(text("SELECT pg_advisory_xact_lock(hashtextextended(:scope_key, 0))"), {"scope_key": scope_key})
+
+
 async def execute_reconciliation_run(db: AsyncSession, run: ReconciliationRun, user_id) -> ReconciliationRun:
     """
     SECTION 4-10 of the run-boundary addendum, extended by Stage 5C
@@ -212,11 +254,32 @@ async def execute_reconciliation_run(db: AsyncSession, run: ReconciliationRun, u
     await db.flush()
 
     try:
+        # ISSUE B: acquire the cross-run scope lock BEFORE any counting/
+        # candidate-generation/suggestion-persistence work begins, and
+        # hold it for the remainder of this transaction (through COMMIT
+        # in the API layer) - see acquire_reconciliation_scope_lock's own
+        # docstring for why this closes the gap the run's own row lock
+        # cannot.
+        await acquire_reconciliation_scope_lock(
+            db, run.legal_entity_id, run.bank_account_id, run.period_start, run.period_end,
+        )
+
+        # ISSUE A (Stage 5C final integrity hardening): only ACTIVE bank
+        # statement transactions are eligible reconciliation evidence -
+        # a REVERSED row must never inflate statement_transaction_count
+        # or eligible_transaction_count, exactly as it must never reach
+        # the matching engine itself (reconciliation_matching_engine.py
+        # applies the identical filter on its own bank-transaction
+        # selection query). The two counts remain equal in Stage 5C
+        # because this stage defines no OTHER bank-side eligibility rule
+        # beyond ACTIVE status - see
+        # docs/STAGE_5C_DETERMINISTIC_MATCHING_ENGINE.md.
         count_stmt = select(func.count(BankStatementTransaction.id)).where(
             BankStatementTransaction.legal_entity_id == run.legal_entity_id,
             BankStatementTransaction.bank_account_id == run.bank_account_id,
             BankStatementTransaction.transaction_date >= run.period_start,
             BankStatementTransaction.transaction_date <= run.period_end,
+            BankStatementTransaction.status == BankStatementTransactionStatus.ACTIVE,
         )
         count = (await db.execute(count_stmt)).scalar_one()
         run.statement_transaction_count = count
@@ -236,6 +299,19 @@ async def execute_reconciliation_run(db: AsyncSession, run: ReconciliationRun, u
         run.ambiguous_count = matching_result.ambiguous_count
         run.unmatched_count = matching_result.unmatched_count
         run.matching_rule_version = MATCHING_RULE_VERSION
+
+        # SECTION 25 (Stage 5D): advanced matching runs AFTER Stage 5C's
+        # one-to-one pass, within the SAME execution boundary/transaction
+        # - never a separate execution endpoint. Reads the suggestions
+        # Stage 5C just persisted for this run to determine its own
+        # candidate pools; never re-runs or alters Stage 5C's own
+        # suggestions.
+        advanced_result = await run_advanced_matching_for_run(
+            db, run_id=run.id, legal_entity_id=run.legal_entity_id, bank_account_id=run.bank_account_id,
+            period_start=run.period_start, period_end=run.period_end, configuration=configuration,
+        )
+        run.advanced_match_count = advanced_result.advanced_match_count
+        run.ambiguous_advanced_count = advanced_result.ambiguous_advanced_count
 
         await transition_run_status(db, run, ReconciliationRunStatus.COMPLETED)
         run.completed_at = datetime.datetime.now(datetime.UTC)

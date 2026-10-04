@@ -37,12 +37,43 @@ needing to touch them.
 
 ## 3. Inputs
 
-- `BankStatementTransaction` (Stage 5A evidence — read-only).
+- `BankStatementTransaction` (Stage 5A evidence — read-only; only
+  `status == ACTIVE` rows are eligible — see Section 3a).
 - `TreasuryTransaction` (the single internal cash ledger — read-only;
   only `status == POSTED` rows are eligible).
 - The run's own `ReconciliationConfiguration` (resolved and stored at
   run *creation* time in Stage 5B — Stage 5C never re-resolves a newer
   version at execution time).
+
+## 3a. Bank evidence eligibility (final integrity hardening)
+
+Only `BankStatementTransaction` rows with `status == ACTIVE` are ever
+counted, matched, or offered as evidence. A `REVERSED` bank statement
+transaction is invisible to Stage 5C entirely:
+
+- Excluded from `execute_reconciliation_run`'s own counting query, so
+  it never inflates `statement_transaction_count`/
+  `eligible_transaction_count`.
+- Excluded from `run_matching_for_run`'s bank-transaction selection
+  query, so it never reaches `run_matching_for_bank_transaction`, never
+  generates a candidate, and never generates a suggestion.
+
+Both queries apply the identical `BankStatementTransactionStatus.ACTIVE`
+filter — a single documented definition of "eligible bank statement
+transaction," not two independently-maintained ones.
+`statement_transaction_count` and `eligible_transaction_count` remain
+numerically identical in Stage 5C because this stage defines no OTHER
+bank-side eligibility rule beyond ACTIVE status; a future stage that
+introduces additional bank-side exclusions (e.g. a transaction already
+consumed by a finalized reconciliation) would be the point at which the
+two counts could diverge. Verified by
+`test_active_transaction_can_participate_reversed_cannot`,
+`test_reversed_transaction_creates_zero_suggestions`,
+`test_reversed_transaction_does_not_inflate_run_counts`, and
+`test_reversed_transaction_cannot_reach_matching_via_direct_call` (the
+last of which calls `run_matching_for_run` directly, not only through
+the top-level API, to prove the filter is enforced at the actual query,
+not merely incidentally by some other layer).
 
 ## 4. Candidate generation
 
@@ -225,11 +256,40 @@ the candidate population may have shifted. Verified by
 
 ## 14. Concurrency
 
-Reuses Stage 5B's row-locked execution boundary unchanged
-(`load_run_for_update`) — a genuine concurrent-request test
-(`asyncio.gather`) proves exactly one of two simultaneous executions
-succeeds and exactly one suggestion set is ever persisted
+Two independent protections, addressing two different races:
+
+**Same run, concurrent execution requests**: Stage 5B's row-locked
+execution boundary (`load_run_for_update`) — a genuine concurrent-request
+test (`asyncio.gather`) proves exactly one of two simultaneous
+executions of the SAME run succeeds and exactly one suggestion set is
+ever persisted
 (`test_concurrent_run_execution_cannot_execute_twice_or_duplicate_suggestions`).
+
+**Different runs, same reconciliation scope (final integrity
+hardening)**: the run's own row lock cannot protect against this, since
+two different `ReconciliationRun` rows never contend for the same row.
+`acquire_reconciliation_scope_lock`
+(`reconciliation_service.py`) takes a PostgreSQL transaction-scoped
+advisory lock (`pg_advisory_xact_lock`), keyed deterministically off
+`(legal_entity_id, bank_account_id, period_start, period_end)` via
+`hashtextextended` — database-backed, survives multiple workers/
+processes, requires no explicit release (auto-released on COMMIT or
+ROLLBACK, so a failed run's lock is never leaked). Acquired as the very
+first action inside `execute_reconciliation_run`'s own transaction,
+before any counting, candidate generation, or suggestion persistence,
+and held for the remainder of that transaction. A second concurrent
+request for the identical scope blocks until the first transaction
+ends, then proceeds against the now-updated claimed-transaction set —
+so the same `TreasuryTransaction` is never consumed by two competing
+runs, verified by
+`test_different_runs_same_scope_cannot_match_concurrently`. Scoped
+narrowly (never a global lock): two genuinely independent scopes (e.g.
+different bank accounts) execute fully concurrently, verified by
+`test_different_scopes_execute_concurrently_without_unnecessary_serialization`.
+
+Only these two guarantees are made — Stage 5C does not claim any
+stronger concurrency guarantee (e.g. serializing all reconciliation
+activity for an entire entity) than what is described above.
 
 ## 15. Entity isolation
 
@@ -275,12 +335,22 @@ empty in Stage 5B) now returns real suggestions.
 
 ## 20. Tests
 
-68 new tests across two files: `tests/test_reconciliation_matching_engine.py`
-(43 — basic signals, currency/entity/account isolation, period/date
+Test counts stated here are the actual `pytest --collect-only -q`
+result at the time of writing, not a carried-forward estimate:
+`tests/test_reconciliation_matching_engine.py` collects **35 tests**
+(basic signals, currency/entity/account isolation, period/date
 tolerance, tie handling, determinism, persistence, idempotency,
-concurrency, configuration versioning, financial integrity, failure
-handling, high-value gating, normalization units, candidate-generation
-performance) plus the existing Stage 5B suite unchanged (26).
+concurrency — both same-run and cross-run scope — configuration
+versioning, financial integrity, failure handling, high-value gating,
+normalization units, candidate-generation performance, entity-scoped
+claim protection, and ACTIVE-only bank evidence); the Stage 5B suite
+(`tests/test_reconciliation_data_model.py`) collects **26 tests**,
+unchanged. The full repository's own `pytest --collect-only -q`
+collects the whole Stage 0-5C suite together (see the Stage 5C final
+integrity hardening report for the exact total at that point in time —
+this document does not restate the whole-repository count, since it
+changes with every stage and hardening pass; run the command yourself
+for the current figure).
 
 ## 21. Performance/indexing
 
