@@ -411,6 +411,30 @@ class OpenItemCategory(str, Enum):
     MISSING_LEDGER_ENTRY = "MISSING_LEDGER_ENTRY"
     MISSING_BANK_ENTRY = "MISSING_BANK_ENTRY"
     EXCEPTION = "EXCEPTION"
+    # Stage 5E: a bank transaction the deterministic engine could not match
+    # unambiguously (2+ equally strong one-to-one candidates). Needed so a
+    # tie is distinguishable from a plain BANK_ONLY item in the work queue.
+    AMBIGUOUS_MATCH = "AMBIGUOUS_MATCH"
+
+
+class OpenItemPriority(str, Enum):
+    LOW = "LOW"
+    MEDIUM = "MEDIUM"
+    HIGH = "HIGH"
+
+
+class OpenItemEventType(str, Enum):
+    """Stage 5E: one row per workflow action in the append-only item history."""
+    CREATED = "CREATED"
+    ASSIGNED = "ASSIGNED"
+    REASSIGNED = "REASSIGNED"
+    INVESTIGATION_STARTED = "INVESTIGATION_STARTED"
+    COMMENT = "COMMENT"
+    EVIDENCE = "EVIDENCE"
+    RESOLVED = "RESOLVED"
+    CLOSED = "CLOSED"
+    REJECTED = "REJECTED"
+    REOPENED = "REOPENED"
 
 
 class OpenItemStatus(str, Enum):
@@ -434,6 +458,9 @@ class ReconciliationOpenItem(Base, UUIDPKMixin, TimestampMixin):
     FacilityEvent, etc.
     """
     __tablename__ = "reconciliation_open_items"
+    __table_args__ = (
+        UniqueConstraint("reconciliation_run_id", "source_key", name="uq_reconciliation_open_item_source"),
+    )
 
     reconciliation_run_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("reconciliation_runs.id"), nullable=False, index=True
@@ -463,6 +490,60 @@ class ReconciliationOpenItem(Base, UUIDPKMixin, TimestampMixin):
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     resolved_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # --- Stage 5E workflow state. `description`/`reason` keep their Stage 5B
+    # meaning (the engine's classification text); everything a human decides
+    # lives in the columns below and, in full, in ReconciliationOpenItemEvent.
+    # Idempotency key: deterministic from (category, bank txn, ledger txn), unique per run,
+    # so re-synchronizing a run can never duplicate an item.
+    source_key: Mapped[str] = mapped_column(String(120), nullable=False)
+    # Business date used for ageing: the bank transaction date, or the ledger event date.
+    item_date: Mapped[datetime.date] = mapped_column(Date, nullable=False, index=True)
+    priority: Mapped[OpenItemPriority] = mapped_column(default=OpenItemPriority.MEDIUM, nullable=False, index=True)
+    due_date: Mapped[datetime.date | None] = mapped_column(Date, nullable=True)
+    assigned_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=True
+    )
+    assigned_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    resolved_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=True
+    )
+    resolution_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    closed_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    closed_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=True
+    )
+    rejected_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    rejection_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class ReconciliationOpenItemEvent(Base, UUIDPKMixin, TimestampMixin):
+    """
+    Stage 5E: the durable, append-only investigation history of one open
+    item (comments, assignments, evidence references, every status change).
+    No workflow endpoint updates or deletes a row here. `legal_entity_id` is
+    denormalized (same convention as the item) so scope filtering never needs
+    a join. Evidence is stored as a plain-text REFERENCE (document / journal /
+    ticket number), never a URL or filesystem path - the repository has no
+    secure evidence-file storage, so file upload is deferred.
+    """
+    __tablename__ = "reconciliation_open_item_events"
+
+    open_item_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("reconciliation_open_items.id"), nullable=False, index=True
+    )
+    legal_entity_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("legal_entities.id"), nullable=False, index=True
+    )
+    event_type: Mapped[OpenItemEventType] = mapped_column(nullable=False)
+    actor_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
+    from_status: Mapped[OpenItemStatus | None] = mapped_column(nullable=True)
+    to_status: Mapped[OpenItemStatus | None] = mapped_column(nullable=True)
+    assignee_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=True
+    )
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reference: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
 
 class ReconciliationConfiguration(Base, UUIDPKMixin, TimestampMixin):

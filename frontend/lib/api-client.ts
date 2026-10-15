@@ -262,6 +262,27 @@ export const api = {
     request<ReconciliationRunOut>(`/reconciliation/runs/${id}/execute`, { method: "POST" }, token),
   cancelReconciliationRun: (token: string, id: string) =>
     request<ReconciliationRunOut>(`/reconciliation/runs/${id}/cancel`, { method: "POST" }, token),
+  listReconciliationOpenItems: (token: string, params: Record<string, string | string[]> = {}) => {
+    const query = new URLSearchParams();
+    Object.entries(params).forEach(([key, value]) => {
+      (Array.isArray(value) ? value : [value]).forEach((v) => v !== "" && query.append(key, v));
+    });
+    const qs = query.toString();
+    return request<ReconciliationOpenItemOut[]>(`/reconciliation/open-items${qs ? `?${qs}` : ""}`, {}, token);
+  },
+  getReconciliationOpenItem: (token: string, id: string) =>
+    request<OpenItemDetailOut>(`/reconciliation/open-items/${id}`, {}, token),
+  getReconciliationOpenItemHistory: (token: string, id: string) =>
+    request<OpenItemEventOut[]>(`/reconciliation/open-items/${id}/history`, {}, token),
+  listAssignableUsers: (token: string, legalEntityId: string) =>
+    request<AssignableUser[]>(`/reconciliation/open-items/assignable-users?legal_entity_id=${legalEntityId}`, {}, token),
+  actOnReconciliationOpenItem: (
+    token: string, id: string,
+    action: "assign" | "start-investigation" | "comments" | "evidence" | "resolve" | "close" | "reject" | "reopen",
+    body: Record<string, unknown> = {},
+  ) =>
+    request<ReconciliationOpenItemOut>(
+      `/reconciliation/open-items/${id}/${action}`, { method: "POST", body: JSON.stringify(body) }, token),
   listReconciliationMatchGroups: (token: string, runId: string) =>
     request<ReconciliationMatchGroupOut[]>(`/reconciliation/runs/${runId}/match-groups`, {}, token),
   listReconciliationConfigurations: (token: string, params?: Record<string, string>) =>
@@ -704,6 +725,68 @@ export interface ReconciliationMatchGroupOut {
   reason: string;
   matching_rule_version: string;
   members: ReconciliationMatchGroupMemberOut[];
+}
+
+export type OpenItemCategory =
+  | "BANK_ONLY" | "LEDGER_ONLY" | "AMOUNT_VARIANCE" | "TIMING_DIFFERENCE" | "DUPLICATE" | "BANK_CHARGE"
+  | "INTERNAL_TRANSFER" | "FX_DIFFERENCE" | "ONE_TO_MANY" | "MANY_TO_ONE" | "BATCH_PAYMENT"
+  | "MISSING_LEDGER_ENTRY" | "MISSING_BANK_ENTRY" | "EXCEPTION" | "AMBIGUOUS_MATCH";
+export type OpenItemStatus = "OPEN" | "UNDER_REVIEW" | "RESOLVED" | "CLOSED" | "REJECTED";
+export type OpenItemPriority = "LOW" | "MEDIUM" | "HIGH";
+
+export interface ReconciliationOpenItemOut {
+  id: string;
+  reconciliation_run_id: string;
+  legal_entity_id: string;
+  bank_account_id: string;
+  bank_statement_transaction_id: string | null;
+  treasury_transaction_id: string | null;
+  category: OpenItemCategory;
+  status: OpenItemStatus;
+  priority: OpenItemPriority;
+  amount: string;
+  currency_code: string;
+  item_date: string;
+  due_date: string | null;
+  description: string | null;
+  reason: string | null;
+  assigned_to_user_id: string | null;
+  assigned_by_user_id: string | null;
+  assigned_at: string | null;
+  resolved_at: string | null;
+  resolved_by_user_id: string | null;
+  resolution_reason: string | null;
+  closed_at: string | null;
+  closed_by_user_id: string | null;
+  rejected_at: string | null;
+  rejection_reason: string | null;
+  created_at: string;
+  age_days: number | null;
+}
+
+export interface OpenItemDetailOut extends ReconciliationOpenItemOut {
+  bank_transaction: Record<string, string> | null;
+  ledger_transaction: Record<string, string> | null;
+  suggestions: Record<string, string | null>[];
+  match_groups: Record<string, string | boolean>[];
+}
+
+export interface OpenItemEventOut {
+  id: string;
+  open_item_id: string;
+  event_type: string;
+  actor_user_id: string | null;
+  from_status: OpenItemStatus | null;
+  to_status: OpenItemStatus | null;
+  assignee_user_id: string | null;
+  note: string | null;
+  reference: string | null;
+  created_at: string;
+}
+
+export interface AssignableUser {
+  id: string;
+  full_name: string;
 }
 
 export interface ReconciliationConfigurationOut {

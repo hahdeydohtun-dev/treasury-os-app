@@ -10,6 +10,8 @@ from app.models.reconciliation import (
     MatchSuggestionStatus,
     MatchType,
     OpenItemCategory,
+    OpenItemEventType,
+    OpenItemPriority,
     OpenItemStatus,
     ReconciliationRunStatus,
 )
@@ -111,14 +113,82 @@ class ReconciliationOpenItemOut(BaseModel):
     treasury_transaction_id: uuid.UUID | None
     category: OpenItemCategory
     status: OpenItemStatus
+    priority: OpenItemPriority
     amount: Decimal
     currency_code: str
-    assigned_to_user_id: uuid.UUID | None
+    item_date: datetime.date
+    due_date: datetime.date | None
     description: str | None
     reason: str | None
+    assigned_to_user_id: uuid.UUID | None
+    assigned_by_user_id: uuid.UUID | None
+    assigned_at: datetime.datetime | None
     resolved_at: datetime.datetime | None
+    resolved_by_user_id: uuid.UUID | None
+    resolution_reason: str | None
+    closed_at: datetime.datetime | None
+    closed_by_user_id: uuid.UUID | None
+    rejected_at: datetime.datetime | None
+    rejection_reason: str | None
+    created_at: datetime.datetime
+    # Days outstanding, computed at read time from item_date (never stored): up to today for an
+    # actionable item, up to the resolution/closure/rejection date once it is no longer actionable.
+    age_days: int | None = None
 
     model_config = {"from_attributes": True}
+
+
+class OpenItemEventOut(BaseModel):
+    id: uuid.UUID
+    open_item_id: uuid.UUID
+    event_type: OpenItemEventType
+    actor_user_id: uuid.UUID | None
+    from_status: OpenItemStatus | None
+    to_status: OpenItemStatus | None
+    assignee_user_id: uuid.UUID | None
+    note: str | None
+    reference: str | None
+    created_at: datetime.datetime
+
+    model_config = {"from_attributes": True}
+
+
+class OpenItemDetailOut(ReconciliationOpenItemOut):
+    bank_transaction: dict | None = None
+    ledger_transaction: dict | None = None
+    suggestions: list[dict] = []
+    match_groups: list[dict] = []
+
+
+class OpenItemAssignRequest(BaseModel):
+    assignee_user_id: uuid.UUID
+    reason: str
+    due_date: datetime.date | None = None
+    priority: OpenItemPriority | None = None
+
+
+class OpenItemReasonRequest(BaseModel):
+    reason: str
+
+
+class OpenItemNoteRequest(BaseModel):
+    note: str | None = None
+
+
+class OpenItemCommentRequest(BaseModel):
+    note: str
+
+
+class OpenItemEvidenceRequest(BaseModel):
+    reference: str
+    note: str | None = None
+
+
+class OpenItemSyncOut(BaseModel):
+    reconciliation_run_id: uuid.UUID
+    created: int
+    already_existing: int
+    by_category: dict[str, int]
 
 
 class ReconciliationConfigurationCreate(BaseModel):

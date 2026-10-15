@@ -17,12 +17,7 @@ Multi-entity, multi-currency Treasury Management System.
 | Stage 5B — Reconciliation Data Model | Complete |
 | Stage 5C — Deterministic Bank Reconciliation Matching Engine | Complete |
 | Stage 5D — Advanced Matching (one-to-many, batch, internal transfer, FX) | Complete |
-| Stage 5E — Open-Item Workflow | **Not Started** |
-| Stage 5F — Reconciliation Reports | **Not Started** |
-| Stage 5G — Adaptive Matching | **Not Started** |
-| Stage 5H — Full Reconciliation Frontend | **Not Started** |
-| Stage 5I — Final Hardening | **Not Started** |
-| Stage 5E — Open-Item Workflow | **Not Started** |
+| Stage 5E — Reconciliation Open-Item Workflow | Complete |
 | Stage 5F — Reconciliation Reports | **Not Started** |
 | Stage 5G — Adaptive Matching | **Not Started** |
 | Stage 5H — Full Reconciliation Frontend | **Not Started** |
@@ -288,7 +283,8 @@ provenance) are all complete — see
 `docs/STAGE_5A_BANK_STATEMENT_INGESTION.md`,
 `docs/STAGE_5B_RECONCILIATION_DATA_MODEL.md`,
 `docs/STAGE_5C_DETERMINISTIC_MATCHING_ENGINE.md`, and
-`docs/STAGE_5D_ADVANCED_MATCHING.md`. Executing a reconciliation run now
+`docs/STAGE_5D_ADVANCED_MATCHING.md`, with Stage 5E (open-item work queue) documented in
+`docs/STAGE_5E_OPEN_ITEM_WORKFLOW.md`. Executing a reconciliation run now
 produces real `ReconciliationMatchSuggestion` rows (one-to-one) and
 `ReconciliationMatchGroup` rows (advanced grouped matches) against
 `TreasuryTransaction`, but nothing yet turns those into a human

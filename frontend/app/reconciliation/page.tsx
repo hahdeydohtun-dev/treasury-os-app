@@ -91,6 +91,11 @@ export default function ReconciliationPage() {
     return (
       <div>
         <h1>Reconciliation</h1>
+      <p>
+        <Link href="/reconciliation/open-items" style={{ color: "var(--color-accent)" }}>
+          Open the work queue (outstanding exceptions) →
+        </Link>
+      </p>
         <p>
           Please <Link href="/login">sign in</Link> to view reconciliation runs.
         </p>

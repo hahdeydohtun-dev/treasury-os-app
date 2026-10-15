@@ -406,10 +406,16 @@ source, no inversion/triangulation). See
       integrity, bounded-candidate-pool performance, and 14 dedicated
       FX rate-selection tests) — full suite (Stage 0-5D) at 296/296
 
-### Stage 5E onward (not started)
+### Stage 5E — Reconciliation Open-Item Workflow (delivered)
 
-- Open-items-first UI (matched transactions available via drill-down only)
-- Assignment/investigation/comment/resolution/approval/closure workflow
+Open items are derived automatically from each run (idempotent, savepoint-atomic), shown as an
+actionable-by-default work queue, and worked through assign → investigate → resolve → close / reject /
+reopen with an append-only history and per-action audit events. See
+`docs/STAGE_5E_OPEN_ITEM_WORKFLOW.md`. Evidence file upload, bulk assignment and exports are deferred.
+
+### Stage 5F onward (not started)
+
+- Reconciliation reports; adaptive matching; full reconciliation frontend
 
 ## Stage 6 — Intercompany Reconciliation
 

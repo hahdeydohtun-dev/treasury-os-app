@@ -199,12 +199,14 @@ async def test_valid_match_suggestion_and_open_item_rows(db_session: AsyncSessio
         bank_statement_transaction_id=None, treasury_transaction_id=None,
         category=OpenItemCategory.BANK_ONLY, status=OpenItemStatus.OPEN,
         amount=Decimal("100000.00"), currency_code="NGN",
+        source_key="BANK_ONLY:test-1", item_date=datetime.date(2026, 6, 15),  # mandatory since Stage 5E
     )
     ledger_only_item = ReconciliationOpenItem(
         reconciliation_run_id=run.id, legal_entity_id=entity_a.id, bank_account_id=account.id,
         bank_statement_transaction_id=None, treasury_transaction_id=None,
         category=OpenItemCategory.LEDGER_ONLY, status=OpenItemStatus.OPEN,
         amount=Decimal("50000.00"), currency_code="NGN",
+        source_key="LEDGER_ONLY:test-2", item_date=datetime.date(2026, 6, 15),  # mandatory since Stage 5E
     )
     db_session.add_all([bank_only_item, ledger_only_item])
     await db_session.flush()

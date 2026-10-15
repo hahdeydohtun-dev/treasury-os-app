@@ -27,6 +27,7 @@ from app.models.reconciliation import (
 )
 from app.services.reconciliation_advanced_matching import run_advanced_matching_for_run
 from app.services.reconciliation_matching_engine import run_matching_for_run
+from app.services.reconciliation_open_item_service import sync_open_items_for_run
 from app.services.reconciliation_scoring import MATCHING_RULE_VERSION
 
 
@@ -312,6 +313,11 @@ async def execute_reconciliation_run(db: AsyncSession, run: ReconciliationRun, u
         )
         run.advanced_match_count = advanced_result.advanced_match_count
         run.ambiguous_advanced_count = advanced_result.ambiguous_advanced_count
+
+        # Stage 5E integration point: derive the actionable open items from this run's results
+        # inside the SAME transaction (and a savepoint, so a failure leaves no partial items).
+        # It only reads engine output and writes open-item rows; no matching behaviour changes.
+        await sync_open_items_for_run(db, run, user_id)
 
         await transition_run_status(db, run, ReconciliationRunStatus.COMPLETED)
         run.completed_at = datetime.datetime.now(datetime.UTC)
