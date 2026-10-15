@@ -17,6 +17,7 @@ from app.api.v1 import (
     investment_reports,
     investments,
     reconciliation,
+    reconciliation_match_proposals,
     reconciliation_open_items,
     transactions,
 )
@@ -35,6 +36,7 @@ api_router.include_router(excel.router)
 api_router.include_router(bank_statements.router)
 api_router.include_router(reconciliation.router)
 api_router.include_router(reconciliation_open_items.router)
+api_router.include_router(reconciliation_match_proposals.router)
 api_router.include_router(forecast.router)
 api_router.include_router(facilities.router)
 api_router.include_router(funding.router)

@@ -93,7 +93,11 @@ export default function ReconciliationPage() {
         <h1>Reconciliation</h1>
       <p>
         <Link href="/reconciliation/open-items" style={{ color: "var(--color-accent)" }}>
-          Open the work queue (outstanding exceptions) →
+          Open the work queue (exceptions) →
+        </Link>
+        {" · "}
+        <Link href="/reconciliation/match-review" style={{ color: "var(--color-accent)" }}>
+          Match review (proposals awaiting a decision) →
         </Link>
       </p>
         <p>

@@ -546,6 +546,60 @@ class ReconciliationOpenItemEvent(Base, UUIDPKMixin, TimestampMixin):
     reference: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
 
+class MatchProposalKind(str, Enum):
+    SUGGESTION = "SUGGESTION"   # a Stage 5C one-to-one ReconciliationMatchSuggestion
+    GROUP = "GROUP"             # a Stage 5D ReconciliationMatchGroup
+
+
+class MatchDecisionType(str, Enum):
+    ACCEPTED = "ACCEPTED"
+    REJECTED = "REJECTED"
+
+
+class ReconciliationMatchDecision(Base, UUIDPKMixin, TimestampMixin):
+    """
+    Stage 5E: the durable, append-only record of an EXPLICIT human decision on a proposed match.
+
+    Disposition semantics (see docs/STAGE_5E_OPEN_ITEM_WORKFLOW.md):
+      PENDING  - a proposal produced by the engine, awaiting a decision. NOT a reconciliation.
+      ACCEPTED - explicitly accepted by an authorized user (this table records who/when/why).
+      REJECTED - explicitly rejected with a reason; the transactions it covered become unmatched
+                 again and are surfaced as actionable open items.
+    A decision never touches a TreasuryTransaction/BankStatementTransaction/BankBalance: it is a
+    reconciliation decision, not a financial posting. Exactly one of suggestion_id/group_id is set,
+    and each proposal can carry at most ONE decision (unique constraints), so a repeated decision is
+    idempotent and a conflicting concurrent decision is refused by the database itself.
+    """
+    __tablename__ = "reconciliation_match_decisions"
+    __table_args__ = (
+        CheckConstraint(
+            "(suggestion_id IS NOT NULL)::int + (group_id IS NOT NULL)::int = 1",
+            name="ck_reconciliation_match_decision_exactly_one_subject",
+        ),
+        UniqueConstraint("suggestion_id", name="uq_reconciliation_match_decision_suggestion"),
+        UniqueConstraint("group_id", name="uq_reconciliation_match_decision_group"),
+    )
+
+    reconciliation_run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("reconciliation_runs.id"), nullable=False, index=True
+    )
+    legal_entity_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("legal_entities.id"), nullable=False, index=True
+    )
+    kind: Mapped[MatchProposalKind] = mapped_column(nullable=False)
+    suggestion_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("reconciliation_match_suggestions.id"), nullable=True
+    )
+    group_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("reconciliation_match_groups.id"), nullable=True
+    )
+    decision: Mapped[MatchDecisionType] = mapped_column(nullable=False, index=True)
+    previous_status: Mapped[str] = mapped_column(String(20), nullable=False)
+    new_status: Mapped[str] = mapped_column(String(20), nullable=False)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    decided_by_user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+
+
 class ReconciliationConfiguration(Base, UUIDPKMixin, TimestampMixin):
     """
     SECTION 13/14: versioned configuration STORAGE only - Stage 5C

@@ -3,26 +3,30 @@ Stage 5E: reconciliation open-item workflow.
 
 Two responsibilities, both strictly downstream of the frozen Stage 5A-5D engine:
 
-1. DERIVATION - turn a run's engine output (Stage 5C suggestions + Stage 5D
-   match groups) into actionable `ReconciliationOpenItem` rows, deterministically
-   and idempotently. An open item is an unresolved exception, never a mere
-   suggestion:
+1. DERIVATION - turn a run's engine output (Stage 5C suggestions + Stage 5D match groups) into
+   actionable `ReconciliationOpenItem` rows, deterministically and idempotently. An open item is an
+   unresolved EXCEPTION, never merely "a suggestion".
 
-   * Stage 5C only ever persists PENDING suggestions (nothing auto-accepts), so
-     "matched" is derived from the engine's own tiering: an UNAMBIGUOUS
-     one-to-one suggestion in the auto-match tier (confidence >= the Stage 5C
-     AUTO_MATCH_THRESHOLD and not downgraded to "[review]" by the high-value
-     gate) is treated as matched and creates NO item. A review-tier suggestion
-     is actionable (classified AMOUNT_VARIANCE / TIMING_DIFFERENCE / EXCEPTION),
-     a tie is AMBIGUOUS_MATCH, and nothing is ever inferred from PENDING alone.
-     (This depends on the documented Stage 5C "[auto-match]"/"[review]" reason
-     prefix for the high-value downgrade; Stage 5C itself is unchanged.)
-   * A bank transaction in a live (PENDING/ACCEPTED) Stage 5D group is matched.
-     Competing AMBIGUOUS groups produce ONE item per anchor transaction.
+   Disposition semantics (see reconciliation_match_decision_service.py):
+   * PENDING is a PROPOSAL AWAITING A DECISION - not a reconciliation and not an exception. The engines
+     never accept anything; only an explicit authorized decision sets ACCEPTED/REJECTED.
+   * A proposal that is awaiting a decision (an unambiguous auto-tier one-to-one suggestion, or a PENDING
+     Stage 5D group of any type) is NOT turned into an exception, because its transactions are already
+     covered by that proposal - but it is NOT treated as reconciled either: it is counted and listed in the
+     match-review queue (`/reconciliation/match-proposals`) until someone decides it. Nothing is hidden.
+   * ACCEPTED proposal -> the transactions are reconciled; no item.
+   * REJECTED proposal -> no longer covers its transactions, so they fall through to the unmatched rules
+     below and become actionable BANK_ONLY / LEDGER_ONLY exceptions, annotated with the rejection reason.
+   * Tied one-to-one candidates, review-tier (weak-evidence) matches and AMBIGUOUS groups are exceptions
+     for investigation (AMBIGUOUS_MATCH / AMOUNT_VARIANCE / TIMING_DIFFERENCE / EXCEPTION / grouped
+     categories) - they are not decidable proposals.
    * Unmatched ACTIVE bank transactions -> BANK_ONLY. REVERSED rows are never read.
-   * Unmatched POSTED ledger transactions in the run scope -> LEDGER_ONLY, unless
-     already claimed by a live suggestion or group (any run) or covered by an
-     ambiguous group - decided with SQL NOT EXISTS, not by loading the ledger.
+   * Unmatched POSTED ledger transactions in the run scope -> LEDGER_ONLY, unless already covered by a live
+     (PENDING/ACCEPTED) suggestion or group (any run) or by an ambiguous group - decided with SQL
+     NOT EXISTS, not by loading the ledger.
+
+   Review-tier vs auto-tier depends on the documented Stage 5C "[review]" reason prefix and confidence;
+   Stage 5C itself is unchanged.
 
 2. WORKFLOW - an explicit state machine with row-locked, audited actions. No
    action here ever creates, changes or deletes a TreasuryTransaction,
@@ -42,6 +46,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.bank_statement import BankStatementTransaction, BankStatementTransactionStatus
 from app.models.rbac import TreasuryModule, User
 from app.models.reconciliation import (
+    MatchDecisionType,
     MatchGroupStatus,
     MatchRelationshipType,
     MatchSuggestionStatus,
@@ -50,6 +55,7 @@ from app.models.reconciliation import (
     OpenItemPriority,
     OpenItemStatus,
     ReconciliationConfiguration,
+    ReconciliationMatchDecision,
     ReconciliationMatchGroup,
     ReconciliationMatchGroupMember,
     ReconciliationMatchSuggestion,
@@ -184,6 +190,35 @@ async def derive_open_item_specs(db: AsyncSession, run: ReconciliationRun) -> li
             if bank_id:
                 bank_in_ambiguous_group.add(bank_id)
 
+    # Reasons recorded when a user REJECTED a proposal for this run: the transactions it covered fall
+    # through to the unmatched rules below, and the resulting exception says why.
+    rejected = (await db.execute(
+        select(ReconciliationMatchDecision).where(
+            ReconciliationMatchDecision.reconciliation_run_id == run.id,
+            ReconciliationMatchDecision.decision == MatchDecisionType.REJECTED,
+        )
+    )).scalars().all()
+    rejected_bank_reason: dict = {}
+    rejected_ledger_reason: dict = {}
+    suggestion_by_id = {s.id: s for s in suggestions}
+    members_by_group: dict = {}
+    for group_id, _status, _rel, member_bank, member_ledger in group_rows:
+        members_by_group.setdefault(group_id, []).append((member_bank, member_ledger))
+    for d in rejected:
+        if d.suggestion_id and d.suggestion_id in suggestion_by_id:
+            sg = suggestion_by_id[d.suggestion_id]
+            pairs = [(sg.bank_statement_transaction_id, sg.treasury_transaction_id)]
+        else:
+            pairs = members_by_group.get(d.group_id, [])
+        for member_bank, member_ledger in pairs:
+            if member_bank:
+                rejected_bank_reason[member_bank] = d.reason
+            if member_ledger:
+                rejected_ledger_reason[member_ledger] = d.reason
+
+    def rejection_note(reasons: dict, key) -> str:
+        return f" A proposed match for it was rejected: {reasons[key]}" if key in reasons else ""
+
     specs: dict = {}
 
     def add(spec: ItemSpec) -> None:
@@ -220,7 +255,10 @@ async def derive_open_item_specs(db: AsyncSession, run: ReconciliationRun) -> li
         if len(candidates) == 1:
             s = candidates[0]
             if s.status == MatchSuggestionStatus.ACCEPTED or _is_auto_match_tier(s.confidence, s.reason):
-                continue  # a valid match: not an exception
+                # ACCEPTED: reconciled. PENDING auto-tier: NOT reconciled - it is a proposal awaiting a decision,
+                # already covering this transaction, and it is counted in the match-review queue. Either way
+                # it is not an exception, so no item (nothing is hidden: see /reconciliation/match-proposals).
+                continue
             ledger = ledger_by_id.get(s.treasury_transaction_id)
             if ledger is None:
                 continue
@@ -240,8 +278,10 @@ async def derive_open_item_specs(db: AsyncSession, run: ReconciliationRun) -> li
                              "(review-tier match).", s.reason or "Review-tier match", _priority_for(bank.amount, threshold)))
             continue
         add(ItemSpec(OpenItemCategory.BANK_ONLY, bank.id, None, bank.amount, bank.currency_code, bank.transaction_date,
-                     "Bank statement transaction with no matching ledger transaction.",
-                     "No candidate met the review threshold", _priority_for(bank.amount, threshold)))
+                     "Bank statement transaction with no matching ledger transaction."
+                     + rejection_note(rejected_bank_reason, bank.id),
+                     "Proposed match rejected" if bank.id in rejected_bank_reason else "No candidate met the review threshold",
+                     _priority_for(bank.amount, threshold)))
 
     # --- Ledger side: unmatched POSTED ledger rows, decided in SQL (never load the whole ledger).
     live_suggestion = exists().where(
@@ -272,8 +312,10 @@ async def derive_open_item_specs(db: AsyncSession, run: ReconciliationRun) -> li
     for ledger in ledger_rows:
         add(ItemSpec(OpenItemCategory.LEDGER_ONLY, None, ledger.id, ledger.transaction_amount,
                      ledger.transaction_currency_code, ledger.event_date,
-                     "Ledger transaction with no matching bank statement transaction.",
-                     "Not claimed by any live match", _priority_for(ledger.transaction_amount, threshold)))
+                     "Ledger transaction with no matching bank statement transaction."
+                     + rejection_note(rejected_ledger_reason, ledger.id),
+                     "Proposed match rejected" if ledger.id in rejected_ledger_reason else "Not claimed by any live match",
+                     _priority_for(ledger.transaction_amount, threshold)))
 
     return list(specs.values())
 

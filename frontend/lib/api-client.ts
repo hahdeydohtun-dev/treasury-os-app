@@ -283,6 +283,19 @@ export const api = {
   ) =>
     request<ReconciliationOpenItemOut>(
       `/reconciliation/open-items/${id}/${action}`, { method: "POST", body: JSON.stringify(body) }, token),
+  getMatchReviewSummary: (token: string) =>
+    request<MatchReviewSummary>(`/reconciliation/match-proposals/summary`, {}, token),
+  listMatchProposals: (token: string, statuses: string[]) => {
+    const query = new URLSearchParams();
+    statuses.forEach((st) => query.append("status", st));
+    return request<MatchProposalRow[]>(`/reconciliation/match-proposals?${query.toString()}`, {}, token);
+  },
+  getMatchProposal: (token: string, kind: string, id: string) =>
+    request<MatchProposalDetail>(`/reconciliation/match-proposals/${kind}/${id}`, {}, token),
+  decideMatchProposal: (token: string, kind: string, id: string, action: "accept" | "reject", reason?: string) =>
+    request<{ status: string; already_decided: boolean }>(
+      `/reconciliation/match-proposals/${kind}/${id}/${action}`,
+      { method: "POST", body: JSON.stringify({ reason: reason ?? null }) }, token),
   listReconciliationMatchGroups: (token: string, runId: string) =>
     request<ReconciliationMatchGroupOut[]>(`/reconciliation/runs/${runId}/match-groups`, {}, token),
   listReconciliationConfigurations: (token: string, params?: Record<string, string>) =>
@@ -787,6 +800,57 @@ export interface OpenItemEventOut {
 export interface AssignableUser {
   id: string;
   full_name: string;
+}
+
+export interface MatchProposalRow {
+  kind: "SUGGESTION" | "GROUP";
+  id: string;
+  reconciliation_run_id: string;
+  legal_entity_id: string;
+  bank_account_id: string;
+  status: "PENDING" | "ACCEPTED" | "REJECTED";
+  label: string;
+  match_type: string | null;
+  confidence: string | null;
+  amount: string;
+  currency_code: string;
+  date: string | null;
+  bank_reference: string | null;
+  ledger_reference: string | null;
+  member_count: number;
+  reason: string | null;
+  created_at: string;
+  decision: {
+    id: string; decision: string; reason: string | null; decided_by_user_id: string; decided_at: string;
+    previous_status: string; new_status: string;
+  } | null;
+}
+
+export interface MatchProposalDetail {
+  kind: "SUGGESTION" | "GROUP";
+  id: string;
+  reconciliation_run_id: string;
+  status: "PENDING" | "ACCEPTED" | "REJECTED" | "AMBIGUOUS";
+  label: string;
+  reason: string | null;
+  confidence: string | null;
+  matching_rule_version: string | null;
+  bank_transactions: Record<string, string>[];
+  ledger_transactions: Record<string, string>[];
+  not_decidable_reason: string | null;
+  decision: MatchProposalRow["decision"];
+  currency_code?: string;
+  bank_aggregate_amount?: string;
+  ledger_aggregate_amount?: string;
+  difference?: string;
+  fx?: Record<string, string | null> | null;
+}
+
+export interface MatchReviewSummary {
+  pending_decisions: number;
+  pending_suggestions: number;
+  pending_groups: number;
+  open_exceptions: number;
 }
 
 export interface ReconciliationConfigurationOut {

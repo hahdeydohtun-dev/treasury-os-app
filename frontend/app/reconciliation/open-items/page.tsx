@@ -7,6 +7,7 @@ import {
   ReconciliationOpenItemOut,
 } from "@/lib/api-client";
 import { useAuthToken } from "@/lib/use-auth-token";
+import ReconciliationTabs from "@/components/ReconciliationTabs";
 
 // Each exception type has its own label and colour so the queue never blurs "ambiguous" with "unmatched" or a
 // variance. A successfully matched transaction is never an open item, so it never appears here.
@@ -126,11 +127,12 @@ export default function OpenItemsPage() {
     <div>
       <h1>Reconciliation work queue</h1>
       <p style={{ color: "var(--color-text-muted)" }}>
-        Outstanding reconciliation exceptions from executed runs. Successfully matched transactions are not listed.
+        Unresolved reconciliation exceptions from executed runs. Matches proposed by the engine that are still awaiting a decision are NOT exceptions and are not listed here - they are in the Match review tab.
         Resolving an item documents the investigation; it never posts or changes a ledger or bank record.{" "}
         <Link href="/reconciliation" style={{ color: "var(--color-accent)" }}>Back to runs</Link>
       </p>
 
+      <ReconciliationTabs active="exceptions" />
       <div className="card" style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "end" }}>
         <label>View<br />
           <select value={viewIndex} onChange={(e) => setViewIndex(Number(e.target.value))}>

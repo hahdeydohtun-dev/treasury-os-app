@@ -284,6 +284,13 @@ claims (entity-scoped via SQL joins to `TreasuryTransaction`/
 rule that an unresolved tie selects no single candidate. Stage 5C's own
 helper is unchanged.
 
+## 10a. Status semantics (clarified in Stage 5E)
+
+A Stage 5D group is created `PENDING` (a *proposal*), or `AMBIGUOUS` (competing candidates, none selected). Stage 5D
+never sets `ACCEPTED` or `REJECTED`: those are explicit human decisions, made in the Stage 5E match-review queue
+(`docs/STAGE_5E_OPEN_ITEM_WORKFLOW.md`). `PENDING` and `ACCEPTED` groups claim their transactions; `REJECTED` and
+`AMBIGUOUS` groups do not. Stage 5D's matching behaviour is unchanged by this clarification.
+
 ## 11. Idempotency
 
 `ReconciliationMatchGroup.group_key` — a deterministic string built from

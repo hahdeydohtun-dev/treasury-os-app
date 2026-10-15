@@ -13,31 +13,68 @@ with a complete history.**
 | State machine: start, resolve, close, reject, reopen | Full reconciliation frontend (5H) |
 | Append-only investigation history (comments, evidence **references**) | Evidence **file upload** (no secure file store exists) |
 | Work-queue API with filters/sorting; focused queue page | Bulk assignment; exports |
-| Per-action audit events; row-locked, concurrency-safe actions | Accepting/rejecting engine *suggestions* (items never change them) |
+| Per-action audit events; row-locked, concurrency-safe actions | Revoking an accept/reject decision (decisions are final) |
+| **Explicit accept/reject of engine proposals** (one-to-one suggestions and Stage 5D groups), with a separate match-review queue | Choosing one candidate out of a tie |
 | | Categories the engine cannot produce: DUPLICATE, BANK_CHARGE, FX_DIFFERENCE, MISSING_* (vocabulary only) |
 
-## 2. What becomes an open item (and what does not)
+## 2. Dispositions: proposal vs accepted match vs exception
 
-An open item is an **unresolved exception**, never "every suggestion". Stage 5C only ever persists
-`PENDING` suggestions (nothing auto-accepts), so "matched" is derived from the engine's own tiering —
-no `PENDING` suggestion is assumed to be a reconciliation.
+Three different things must never be confused:
 
-| Situation (per bank row / ledger row, ACTIVE / POSTED only) | Result |
-|---|---|
-| Unambiguous 1:1 suggestion, **auto-match tier** (confidence ≥ Stage 5C `AUTO_MATCH_THRESHOLD`, not downgraded to `[review]`) or `ACCEPTED` | **No item** (matched) |
-| Member of a live (`PENDING`/`ACCEPTED`) Stage 5D group (one-to-many, many-to-one, batch, internal transfer, FX) | **No item** |
-| Unambiguous 1:1 suggestion, **review tier** | `AMOUNT_VARIANCE` (amounts differ; item amount = the variance), else `TIMING_DIFFERENCE` (dates differ), else `EXCEPTION` (weak evidence) |
-| 2+ tied 1:1 candidates | `AMBIGUOUS_MATCH` (one per bank row; the tied ledger rows add nothing) |
-| `AMBIGUOUS` Stage 5D groups | One item per anchor: `ONE_TO_MANY` / `MANY_TO_ONE` / `BATCH_PAYMENT`, however many competing groups share it |
-| No suggestion / no match | `BANK_ONLY` |
-| `REVERSED` bank row | **Never read** |
-| POSTED ledger row in scope, not claimed by any live suggestion or group (any run), not in an ambiguous group | `LEDGER_ONLY` (decided in SQL with `NOT EXISTS`, never by loading the ledger) |
+| Term | Meaning | Who/what sets it |
+|---|---|---|
+| **PENDING** (suggestion or group) | A **proposal awaiting a decision**. Not a reconciliation, however high its confidence. | The Stage 5C/5D engines (they never accept anything) |
+| **ACCEPTED** | An **explicitly accepted** reconciliation match. | Only an authorized user, via the accept action (decision record written) |
+| **REJECTED** | An **explicitly rejected** proposal, with a mandatory reason. Its transactions are unmatched again. | Only an authorized user, via the reject action |
+| **OPEN / UNDER_REVIEW** | An **unresolved exception** needing investigation | Open-item derivation (§3) |
+| **RESOLVED / CLOSED** | Investigation outcome and closure - documentation, **never** an accounting posting | Workflow actions (§5) |
 
-Note: the high-value "review" downgrade exists only as the `[review]` reason prefix in Stage 5C output;
-Stage 5E reads that documented prefix and leaves Stage 5C untouched.
+An earlier version of this stage treated an auto-tier `PENDING` suggestion and any `PENDING` group as if they were
+"matched" and silently hid them. That was wrong: nothing in the codebase could ever set `ACCEPTED`, so the
+"matched" state was an unverifiable assumption. It is corrected as follows.
 
-Items are **per run** (`unique(run, source_key)`). Re-running reconciliation creates a new run with its
-own items; no cross-run de-duplication is attempted.
+### Where each engine output goes
+
+| Engine output (ACTIVE bank / POSTED ledger rows only) | Queue | Item? |
+|---|---|---|
+| Unambiguous 1:1 suggestion in the auto-match tier (confidence ≥ Stage 5C `AUTO_MATCH_THRESHOLD`, not downgraded to `[review]`), `PENDING` | **Match review** (decision needed, counted) | No - it is a proposal, not an exception |
+| `PENDING` Stage 5D group - ONE_TO_MANY, MANY_TO_ONE, BATCH, INTERNAL_TRANSFER or FX_MATCH | **Match review** (decision needed, counted) | No |
+| Any of the above once **ACCEPTED** | Match review → "Accepted" | No (reconciled) |
+| Any of the above once **REJECTED** | Match review → "Rejected" (disposition kept) | **Yes**: its transactions fall through to BANK_ONLY / LEDGER_ONLY, annotated with the rejection reason. (An INTERNAL_TRANSFER group has no bank member and its legs are individually covered, so its rejection can raise no exception: the decision record is the documented disposition.) |
+| Unambiguous 1:1 suggestion, **review tier** (weak evidence) | Exceptions | `AMOUNT_VARIANCE` (item amount = the variance), else `TIMING_DIFFERENCE`, else `EXCEPTION` |
+| 2+ tied 1:1 candidates | Exceptions | `AMBIGUOUS_MATCH` (one per bank row) |
+| `AMBIGUOUS` Stage 5D groups | Exceptions | One item per anchor: `ONE_TO_MANY` / `MANY_TO_ONE` / `BATCH_PAYMENT` |
+| No suggestion / no match | Exceptions | `BANK_ONLY` |
+| POSTED ledger row in scope not covered by a live (`PENDING`/`ACCEPTED`) suggestion or group (any run) or an ambiguous group | Exceptions | `LEDGER_ONLY` (SQL `NOT EXISTS`) |
+| `REVERSED` bank row | - | Never read |
+
+Ties, `AMBIGUOUS` groups and review-tier suggestions are **not decidable** (accept/reject returns 400 with an
+explanation pointing at the exceptions queue): a human must first investigate which candidate is right, which is
+what an open item is for. Choosing one candidate out of a tie is not supported.
+
+A `PENDING` proposal is *counted*, never hidden: the **Match review** queue shows the outstanding-decision count
+(also on a tab on both queues), and `GET /reconciliation/match-proposals/summary` returns it.
+The auto/review tier depends on the documented Stage 5C `[review]` reason prefix and confidence; Stage 5C is unchanged.
+
+### Decisions
+
+- `POST /reconciliation/match-proposals/{SUGGESTION|GROUP}/{id}/accept|reject`. Reject needs a reason (≥ 10 chars);
+  accept's reason is optional.
+- **Permission: `BANK_RECONCILIATION` `APPROVE`** - the repository's existing decision permission (already used for
+  funding, facility and investment approvals). No new permission was invented. Viewing needs `VIEW`; a proposal the
+  caller cannot view is reported as **404**.
+- Each decision locks the proposal row, sets its status (`ACCEPTED`/`REJECTED`), writes an append-only
+  `reconciliation_match_decisions` record (actor, time, previous/new status, reason, run, proposal) and one central
+  `AuditEvent` (`MATCH_ACCEPTED`/`MATCH_REJECTED`). Unique constraints allow **one decision per proposal**.
+- **Idempotent:** repeating the same decision returns `already_decided: true` and writes nothing. **Conflicting**
+  decisions (accept then reject, or two concurrent requests) return **409**; exactly one is ever recorded. Decisions
+  are final in this stage (no revoke).
+- A rejection re-runs open-item derivation in the same transaction so the freed transactions become actionable
+  immediately; existing items (including resolved/closed ones) are never touched.
+- A decision changes only the proposal's status. It never touches a `TreasuryTransaction`, `BankStatementTransaction`,
+  `BankBalance` or any cash record, and posts nothing.
+- Rejecting releases the transactions from the engine's claim, per the existing Stage 5C/5D rule that only
+  `PENDING`/`ACCEPTED` proposals claim a transaction. A *new* run may re-propose the same match.
 
 ## 3. Idempotency and atomicity
 
@@ -106,6 +143,10 @@ number); URLs and file paths (including `C:\...`) are refused.
 | `GET /reconciliation/open-items/assignable-users?legal_entity_id=` | Active users who can work the entity's items |
 | `POST /reconciliation/runs/{id}/open-items/sync` | Idempotent (re)synchronization of a COMPLETED run |
 | `GET /reconciliation/runs/{id}/open-items` | (Stage 5B) items of one run |
+| `GET /reconciliation/match-proposals` | Match-review queue. Default `status=PENDING`; `ACCEPTED`/`REJECTED` for history; filters `kind`, `relationship_type`, `run_id`, `legal_entity_id` |
+| `GET /reconciliation/match-proposals/summary` | `{pending_decisions, pending_suggestions, pending_groups, open_exceptions}` |
+| `GET /reconciliation/match-proposals/{kind}/{id}` | Supporting bank/ledger transactions, group aggregates, FX provenance, decision |
+| `POST /reconciliation/match-proposals/{kind}/{id}/accept` · `/reject` | Explicit decision (see above) |
 
 Age is computed at read time from `item_date` (bank transaction date or ledger event date): up to today while
 actionable, up to the resolution/closure/rejection date afterwards. It is never stored.
@@ -116,7 +157,7 @@ actionable, up to the resolution/closure/rejection date afterwards. It is never 
 `assigned_by_user_id`, `assigned_at`, `resolved_by_user_id`, `resolution_reason`, `closed_at`,
 `closed_by_user_id`, `rejected_at`, `rejection_reason`, plus `unique(run, source_key)`. The existing
 `description`/`reason` keep their meaning (the engine's classification text). New table
-`reconciliation_open_item_events`; new enum value `AMBIGUOUS_MATCH`. Migration `23ffdb804f43`: new NOT NULL
+`reconciliation_open_item_events`; new enum value `AMBIGUOUS_MATCH`; and `reconciliation_match_decisions` (migration `f4c533db287d`, table only - no existing column or status changed). Migration `23ffdb804f43`: new NOT NULL
 columns are added nullable, backfilled, then tightened; downgrade drops the Stage 5E workflow
 tables/columns only (operational workflow data; no financial value is touched) and cannot remove the enum
 value. One Stage 5B test constructs raw open-item rows and was updated to supply the two now-mandatory fields.
@@ -132,7 +173,9 @@ changed. Persisted-money precision (0–2 decimals) is unchanged; item amounts a
 
 - Per-run items: the same underlying exception appears once per run that observes it.
 - "Matched" for 1:1 suggestions relies on the Stage 5C auto/review tier (confidence + `[review]` prefix).
-- Resolving/rejecting an item does not change the engine's suggestion/group status (no accept/reject of
-  suggestions in this stage).
+- Resolving/rejecting an *open item* does not change any proposal's status; accepting/rejecting a *proposal* is the
+  separate match-review action. Decisions are final (no revoke) and one candidate cannot be chosen out of a tie.
+- A later run can re-propose a match that was rejected; no memory of rejections is fed back to the engines (that
+  would be adaptive matching, Stage 5G).
 - No bulk assignment, exports, notifications, or SLA escalation.
 - The queue page shows assignee names only for users returned by the assignable-users list.
