@@ -838,6 +838,7 @@ export interface MatchProposalDetail {
   bank_transactions: Record<string, string>[];
   ledger_transactions: Record<string, string>[];
   not_decidable_reason: string | null;
+  acceptance_conflict?: string | null;
   decision: MatchProposalRow["decision"];
   currency_code?: string;
   bank_aggregate_amount?: string;

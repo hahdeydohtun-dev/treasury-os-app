@@ -161,6 +161,11 @@ export default function MatchReviewPage() {
                 {detail.decision.reason ? ` – ${detail.decision.reason}` : ""}</p>
             )}
             {detail.not_decidable_reason && <p style={{ color: "var(--color-warning)" }}>{detail.not_decidable_reason}</p>}
+            {detail.acceptance_conflict && (
+              <p style={{ color: "var(--color-danger)" }}>
+                <strong>Cannot be accepted:</strong> {detail.acceptance_conflict} You can still reject this proposal.
+              </p>
+            )}
             {actionError && <p style={{ color: "var(--color-danger)" }}>{actionError}</p>}
             {notice && <p style={{ color: "var(--color-accent)" }}>{notice}</p>}
 
@@ -169,7 +174,7 @@ export default function MatchReviewPage() {
                 <textarea rows={3} style={{ width: "100%" }} value={reason} onChange={(e) => setReason(e.target.value)}
                   placeholder="Reason (optional to accept; at least 10 characters to reject)" />
                 <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
-                  <button className="btn-primary" onClick={() => decide("accept")}>Accept match</button>
+                  <button className="btn-primary" disabled={!!detail.acceptance_conflict} onClick={() => decide("accept")}>Accept match</button>
                   <button className="btn-secondary" disabled={reason.trim().length < 10} onClick={() => decide("reject")}>Reject proposal</button>
                 </div>
               </>

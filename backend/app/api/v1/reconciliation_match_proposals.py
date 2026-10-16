@@ -269,7 +269,7 @@ async def get_match_proposal(
         "legal_entity_id": str(run.legal_entity_id), "bank_account_id": str(run.bank_account_id),
         "status": proposal.status.value, "reason": proposal.reason,
         "decision": _decision_dict(found.get((kind.value, proposal.id))),
-        "bank_transactions": [], "ledger_transactions": [], "not_decidable_reason": None,
+        "bank_transactions": [], "ledger_transactions": [], "not_decidable_reason": None, "acceptance_conflict": None,
     }
     if kind == MatchProposalKind.SUGGESTION:
         out.update({"label": "ONE_TO_ONE", "confidence": str(proposal.confidence) if proposal.confidence is not None else None,
@@ -310,6 +310,10 @@ async def get_match_proposal(
                 .order_by(TreasuryTransaction.event_date, TreasuryTransaction.id))).scalars()]
         if proposal.status == MatchGroupStatus.AMBIGUOUS:
             out["not_decidable_reason"] = "Competing ambiguous groups are exceptions to investigate from the open-items queue."
+    if out["status"] == "PENDING" and not out["not_decidable_reason"]:
+        # Surfaces, BEFORE the user clicks, that accepting would fail: an overlapping proposal (any run) was already
+        # accepted, or a member transaction is no longer eligible. Rejecting such a proposal remains possible.
+        out["acceptance_conflict"] = await decisions.acceptance_blocker(db, kind, proposal, run)
     return out
 
 

@@ -15,26 +15,42 @@ deliberately NOT decidable here because it is already an investigation item: tie
 groups (a human must first work out which is right) and review-tier suggestions (weak evidence). A decision
 changes only the proposal's status and writes an append-only record - it never touches a
 TreasuryTransaction, BankStatementTransaction or BankBalance, and posts nothing.
+
+Duplicate-acceptance protection (see `find_acceptance_conflict` and the `reconciliation_accepted_claims` table):
+a bank-statement or ledger transaction can be part of at most ONE accepted proposal per namespace
+(MATCH for bank-to-ledger proposals, TRANSFER for INTERNAL_TRANSFER groups), across ALL runs. Acceptance first
+checks eligibility and conflicts for a clear 409, and the claim INSERT is the real guarantee: partial unique
+indexes make a conflicting acceptance impossible even when two requests race past the pre-check, because the
+second INSERT waits for the first transaction and then fails (mapped to 409, with nothing else written).
+Only ACCEPTED proposals claim: two overlapping PENDING proposals may coexist, and accepting one never
+accepts or rejects the other.
 """
 import uuid
 from dataclasses import dataclass
 
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.bank_statement import BankStatementTransaction, BankStatementTransactionStatus
 from app.models.rbac import TreasuryModule, User
 from app.models.reconciliation import (
+    AcceptedClaimKind,
     MatchDecisionType,
     MatchGroupStatus,
     MatchProposalKind,
+    MatchRelationshipType,
     MatchSuggestionStatus,
+    ReconciliationAcceptedClaim,
     ReconciliationMatchDecision,
     ReconciliationMatchGroup,
+    ReconciliationMatchGroupMember,
     ReconciliationMatchSuggestion,
     ReconciliationRun,
     ReconciliationRunStatus,
 )
+from app.models.treasury_transaction import TransactionStatus, TreasuryTransaction
 from app.services.audit_service import record_audit_event
 from app.services.reconciliation_open_item_service import (
     _is_auto_match_tier,
@@ -85,6 +101,104 @@ async def suggestion_not_decidable_reason(db: AsyncSession, s: ReconciliationMat
         return ("This is a review-tier (weak-evidence) match, which is an exception to investigate from the "
                 "open-items queue rather than a proposal to approve.")
     return None
+
+
+@dataclass(frozen=True)
+class ClaimSpec:
+    kind: AcceptedClaimKind
+    bank_id: uuid.UUID | None
+    treasury_id: uuid.UUID | None
+
+
+async def proposal_claims(db: AsyncSession, kind: MatchProposalKind, proposal) -> list[ClaimSpec]:
+    """Every transaction an accepted `proposal` would claim, with its namespace."""
+    if kind == MatchProposalKind.SUGGESTION:
+        return [ClaimSpec(AcceptedClaimKind.MATCH, proposal.bank_statement_transaction_id, None),
+                ClaimSpec(AcceptedClaimKind.MATCH, None, proposal.treasury_transaction_id)]
+    namespace = (AcceptedClaimKind.TRANSFER if proposal.relationship_type == MatchRelationshipType.INTERNAL_TRANSFER
+                 else AcceptedClaimKind.MATCH)
+    members = (await db.execute(
+        select(ReconciliationMatchGroupMember).where(ReconciliationMatchGroupMember.match_group_id == proposal.id)
+    )).scalars().all()
+    return [ClaimSpec(namespace, m.bank_statement_transaction_id, m.treasury_transaction_id) for m in members]
+
+
+async def eligibility_problem(
+    db: AsyncSession, kind: MatchProposalKind, proposal, run: ReconciliationRun, claims: list[ClaimSpec],
+) -> str | None:
+    """
+    Every underlying transaction must still be eligible: a bank row must be ACTIVE (not REVERSED) and a ledger
+    row POSTED, both in the run's legal entity and bank account (an INTERNAL_TRANSFER pair leg may sit in another
+    account of the same entity), with currencies consistent with the proposal. This guards against data that
+    changed after the engine produced the proposal.
+    """
+    bank_ids = [c.bank_id for c in claims if c.bank_id]
+    ledger_ids = [c.treasury_id for c in claims if c.treasury_id]
+    banks = {b.id: b for b in (await db.execute(
+        select(BankStatementTransaction).where(BankStatementTransaction.id.in_(bank_ids)))).scalars()} if bank_ids else {}
+    ledgers = {t.id: t for t in (await db.execute(
+        select(TreasuryTransaction).where(TreasuryTransaction.id.in_(ledger_ids)))).scalars()} if ledger_ids else {}
+    transfer = kind == MatchProposalKind.GROUP and proposal.relationship_type == MatchRelationshipType.INTERNAL_TRANSFER
+    fx = kind == MatchProposalKind.GROUP and proposal.relationship_type == MatchRelationshipType.FX_MATCH
+
+    for bank_id in bank_ids:
+        b = banks.get(bank_id)
+        if b is None or b.status != BankStatementTransactionStatus.ACTIVE:
+            return f"Bank statement transaction {bank_id} is no longer eligible (missing or reversed)."
+        if b.legal_entity_id != run.legal_entity_id or b.bank_account_id != run.bank_account_id:
+            return f"Bank statement transaction {bank_id} is outside this run's legal entity / bank account."
+    for ledger_id in ledger_ids:
+        t = ledgers.get(ledger_id)
+        if t is None or t.status != TransactionStatus.POSTED:
+            return f"Ledger transaction {ledger_id} is no longer eligible (missing or not POSTED)."
+        if t.legal_entity_id != run.legal_entity_id or (not transfer and t.bank_account_id != run.bank_account_id):
+            return f"Ledger transaction {ledger_id} is outside this run's legal entity / bank account."
+
+    if kind == MatchProposalKind.SUGGESTION:
+        if banks[bank_ids[0]].currency_code != ledgers[ledger_ids[0]].transaction_currency_code:
+            return "The bank and ledger transactions are in different currencies."
+    elif fx:
+        if any(b.currency_code != proposal.fx_source_currency_code for b in banks.values()) or any(
+                t.transaction_currency_code != proposal.fx_target_currency_code for t in ledgers.values()):
+            return "A member's currency no longer matches the FX proposal's source/target currencies."
+    elif not transfer and (
+        any(b.currency_code != proposal.currency_code for b in banks.values())
+        or any(t.transaction_currency_code != proposal.currency_code for t in ledgers.values())
+    ):
+        return "A member's currency does not match the proposal's currency."
+    return None
+
+
+async def find_acceptance_conflict(db: AsyncSession, claims: list[ClaimSpec]) -> str | None:
+    """A clear message if any claimed transaction is already part of an ACCEPTED proposal (any run), else None."""
+    conditions = [
+        and_(ReconciliationAcceptedClaim.claim_kind == c.kind,
+             ReconciliationAcceptedClaim.bank_statement_transaction_id == c.bank_id) if c.bank_id
+        else and_(ReconciliationAcceptedClaim.claim_kind == c.kind,
+                  ReconciliationAcceptedClaim.treasury_transaction_id == c.treasury_id)
+        for c in claims
+    ]
+    if not conditions:
+        return None
+    row = (await db.execute(
+        select(ReconciliationAcceptedClaim, ReconciliationMatchDecision)
+        .join(ReconciliationMatchDecision, ReconciliationMatchDecision.id == ReconciliationAcceptedClaim.decision_id)
+        .where(or_(*conditions)).limit(1)
+    )).first()
+    if row is None:
+        return None
+    claim, prior = row
+    what = (f"bank statement transaction {claim.bank_statement_transaction_id}" if claim.bank_statement_transaction_id
+            else f"ledger transaction {claim.treasury_transaction_id}")
+    return (f"Conflicts with an accepted proposal: {what} is already part of an accepted "
+            f"{prior.kind.value.lower()} (decision {prior.id}, run {prior.reconciliation_run_id}). "
+            f"A transaction cannot be accepted through two proposals.")
+
+
+async def acceptance_blocker(db: AsyncSession, kind: MatchProposalKind, proposal, run: ReconciliationRun) -> str | None:
+    """Why this PENDING proposal could not be accepted right now (ineligible member or conflicting acceptance)."""
+    claims = await proposal_claims(db, kind, proposal)
+    return await eligibility_problem(db, kind, proposal, run, claims) or await find_acceptance_conflict(db, claims)
 
 
 async def decide_proposal(
@@ -138,7 +252,6 @@ async def decide_proposal(
     if len(text) > 4000:
         raise HTTPException(status_code=422, detail="Reason is too long (maximum 4000 characters).")
 
-    proposal.status = (MatchSuggestionStatus if kind == MatchProposalKind.SUGGESTION else MatchGroupStatus)[target_status]
     record = ReconciliationMatchDecision(
         reconciliation_run_id=run.id, legal_entity_id=run.legal_entity_id, kind=kind,
         suggestion_id=proposal.id if kind == MatchProposalKind.SUGGESTION else None,
@@ -146,7 +259,41 @@ async def decide_proposal(
         decision=decision, previous_status=current_status, new_status=target_status,
         reason=text or None, decided_by_user_id=actor.id,
     )
-    db.add(record)
+    if decision == MatchDecisionType.ACCEPTED:
+        claims = await proposal_claims(db, kind, proposal)
+        problem = await eligibility_problem(db, kind, proposal, run, claims)
+        if problem:
+            raise HTTPException(status_code=409, detail=f"Cannot accept: {problem}")
+        conflict = await find_acceptance_conflict(db, claims)
+        if conflict:
+            raise HTTPException(status_code=409, detail=conflict)
+        # The real guarantee. The decision and its claims are written inside a savepoint BEFORE anything else
+        # changes. If another transaction accepted an overlapping proposal after our pre-check, our INSERT waits
+        # for that transaction and then violates a unique index; we then write NOTHING (no decision, no status
+        # change, no audit event) and report 409.
+        try:
+            async with db.begin_nested():
+                db.add(record)
+                await db.flush()
+                db.add_all([
+                    ReconciliationAcceptedClaim(
+                        decision_id=record.id, legal_entity_id=run.legal_entity_id, claim_kind=c.kind,
+                        bank_statement_transaction_id=c.bank_id, treasury_transaction_id=c.treasury_id)
+                    for c in claims
+                ])
+                await db.flush()
+        except IntegrityError as exc:
+            if "ux_accepted_claim" not in str(exc.orig):
+                raise
+            raise HTTPException(
+                status_code=409,
+                detail=(await find_acceptance_conflict(db, claims))
+                or "Conflicts with a proposal accepted concurrently. A transaction cannot be accepted twice.",
+            ) from None
+    else:
+        db.add(record)
+        await db.flush()
+    proposal.status = (MatchSuggestionStatus if kind == MatchProposalKind.SUGGESTION else MatchGroupStatus)[target_status]
     await db.flush()
     await record_audit_event(
         db, module=_MODULE, action=f"MATCH_{target_status}",

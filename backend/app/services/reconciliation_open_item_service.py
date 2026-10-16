@@ -20,7 +20,8 @@ Two responsibilities, both strictly downstream of the frozen Stage 5A-5D engine:
    * Tied one-to-one candidates, review-tier (weak-evidence) matches and AMBIGUOUS groups are exceptions
      for investigation (AMBIGUOUS_MATCH / AMOUNT_VARIANCE / TIMING_DIFFERENCE / EXCEPTION / grouped
      categories) - they are not decidable proposals.
-   * Unmatched ACTIVE bank transactions -> BANK_ONLY. REVERSED rows are never read.
+   * Unmatched ACTIVE bank transactions -> BANK_ONLY, unless a live proposal in another run covers them.
+     REVERSED rows are never read.
    * Unmatched POSTED ledger transactions in the run scope -> LEDGER_ONLY, unless already covered by a live
      (PENDING/ACCEPTED) suggestion or group (any run) or by an ambiguous group - decided with SQL
      NOT EXISTS, not by loading the ledger.
@@ -150,6 +151,31 @@ async def derive_open_item_specs(db: AsyncSession, run: ReconciliationRun) -> li
     )).scalars().all()
     bank_by_id = {b.id: b for b in bank_rows}
 
+    # A bank row already covered by a live (PENDING/ACCEPTED) proposal in ANOTHER run is not "unmatched": it is
+    # represented by that proposal (and, if that proposal is later rejected, by the exceptions raised then). This
+    # mirrors the ledger side below, which already treats a live claim from ANY run as coverage. Without it, a
+    # second run over the same period would raise false BANK_ONLY exceptions for rows the first run matched.
+    in_scope = (BankStatementTransaction.legal_entity_id == run.legal_entity_id,
+                BankStatementTransaction.bank_account_id == run.bank_account_id,
+                BankStatementTransaction.transaction_date >= run.period_start,
+                BankStatementTransaction.transaction_date <= run.period_end)
+    covered_elsewhere: set = {row[0] for row in (await db.execute(
+        select(ReconciliationMatchSuggestion.bank_statement_transaction_id)
+        .join(BankStatementTransaction,
+              BankStatementTransaction.id == ReconciliationMatchSuggestion.bank_statement_transaction_id)
+        .where(ReconciliationMatchSuggestion.reconciliation_run_id != run.id,
+               ReconciliationMatchSuggestion.treasury_transaction_id.is_not(None),
+               ReconciliationMatchSuggestion.status.in_(_LIVE_SUGGESTION), *in_scope)
+    )).all()}
+    covered_elsewhere |= {row[0] for row in (await db.execute(
+        select(ReconciliationMatchGroupMember.bank_statement_transaction_id)
+        .join(ReconciliationMatchGroup, ReconciliationMatchGroup.id == ReconciliationMatchGroupMember.match_group_id)
+        .join(BankStatementTransaction,
+              BankStatementTransaction.id == ReconciliationMatchGroupMember.bank_statement_transaction_id)
+        .where(ReconciliationMatchGroup.reconciliation_run_id != run.id,
+               ReconciliationMatchGroup.status.in_(_LIVE_GROUP), *in_scope)
+    )).all()}
+
     suggestions = (await db.execute(
         select(ReconciliationMatchSuggestion).where(ReconciliationMatchSuggestion.reconciliation_run_id == run.id)
     )).scalars().all()
@@ -244,7 +270,9 @@ async def derive_open_item_specs(db: AsyncSession, run: ReconciliationRun) -> li
     # --- Bank side.
     for bank in bank_rows:
         if bank.id in bank_in_live_group or bank.id in bank_in_ambiguous_group:
-            continue  # matched by a live group, or already represented by an ambiguous-group item
+            continue  # covered by a live group, or already represented by an ambiguous-group item
+        if bank.id in covered_elsewhere:
+            continue  # covered by a live proposal in another run (see above)
         candidates = real_by_bank.get(bank.id, [])
         if len(candidates) >= 2:
             add(ItemSpec(OpenItemCategory.AMBIGUOUS_MATCH, bank.id, None, bank.amount, bank.currency_code,

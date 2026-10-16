@@ -78,6 +78,7 @@ from app.models.bank_statement import (  # noqa: F401
     BankStatementTransactionStatus,
 )
 from app.models.reconciliation import (  # noqa: F401
+    AcceptedClaimKind,
     RECONCILIATION_RUN_STATUS_TRANSITIONS,
     MatchDecisionType,
     MatchGroupStatus,
@@ -90,6 +91,7 @@ from app.models.reconciliation import (  # noqa: F401
     OpenItemPriority,
     OpenItemStatus,
     ReconciliationConfiguration,
+    ReconciliationAcceptedClaim,
     ReconciliationMatchDecision,
     ReconciliationMatchGroup,
     ReconciliationMatchGroupMember,

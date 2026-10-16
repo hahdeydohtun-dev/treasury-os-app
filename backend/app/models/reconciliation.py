@@ -600,6 +600,50 @@ class ReconciliationMatchDecision(Base, UUIDPKMixin, TimestampMixin):
     decided_by_user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
 
 
+class AcceptedClaimKind(str, Enum):
+    """
+    Namespace of an accepted claim. A bank/ledger transaction may be part of at most ONE accepted proposal
+    PER NAMESPACE. MATCH covers every bank-to-ledger proposal (one-to-one suggestions and the ONE_TO_MANY,
+    MANY_TO_ONE, BATCH and FX_MATCH groups). TRANSFER covers INTERNAL_TRANSFER groups: Stage 5D defines a
+    transfer group as additional context about an already-matched ledger leg ("not an alternative candidate
+    pool"), so a one-to-one suggestion and the transfer group that includes its leg are compatible by design,
+    whereas two transfer groups sharing a leg are not.
+    """
+    MATCH = "MATCH"
+    TRANSFER = "TRANSFER"
+
+
+class ReconciliationAcceptedClaim(Base, UUIDPKMixin, TimestampMixin):
+    """
+    Stage 5E: one row per transaction per ACCEPTED proposal. This table is what makes duplicate acceptance
+    impossible rather than merely checked: the partial unique indexes (see the migration) mean two accepted
+    proposals can never share a transaction within a namespace, even across reconciliation runs and even if two
+    acceptance requests race - the second INSERT waits on the first transaction and then fails. Rows are
+    written only together with their decision, and decisions are final, so claims are never released.
+    """
+    __tablename__ = "reconciliation_accepted_claims"
+    __table_args__ = (
+        CheckConstraint(
+            "(bank_statement_transaction_id IS NOT NULL)::int + (treasury_transaction_id IS NOT NULL)::int = 1",
+            name="ck_reconciliation_accepted_claim_exactly_one_transaction",
+        ),
+    )
+
+    decision_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("reconciliation_match_decisions.id"), nullable=False, index=True
+    )
+    legal_entity_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("legal_entities.id"), nullable=False, index=True
+    )
+    claim_kind: Mapped[AcceptedClaimKind] = mapped_column(nullable=False)
+    bank_statement_transaction_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("bank_statement_transactions.id"), nullable=True
+    )
+    treasury_transaction_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("treasury_transactions.id"), nullable=True
+    )
+
+
 class ReconciliationConfiguration(Base, UUIDPKMixin, TimestampMixin):
     """
     SECTION 13/14: versioned configuration STORAGE only - Stage 5C
