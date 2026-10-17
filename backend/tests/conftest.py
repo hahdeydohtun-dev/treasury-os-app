@@ -1,12 +1,27 @@
 import uuid
 from collections.abc import AsyncGenerator
 
+import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.security import hash_password
+from tests._db_safety import (
+    configure_test_database,
+    guarded_truncate,
+    register_approved_test_database,
+)
+
+# SAFETY GUARD (see tests/_db_safety.py and docs/TEST_DATABASE_SAFETY.md). This MUST run before
+# app.db.session is imported, because that module builds the engine from `settings` at import time.
+# The suite never uses the application's DATABASE_URL: it re-points the settings at the explicit,
+# validated TREASURY_TEST_DATABASE_URL, or leaves them alone and refuses to run (see pytest_configure
+# and _clean_database, which both fail closed).
+APPROVED_TEST_DATABASE, _TEST_DATABASE_CONFIG_ERROR = configure_test_database(settings)
+register_approved_test_database(APPROVED_TEST_DATABASE)
+
 from app.db.session import AsyncSessionLocal, engine
 from app.main import app
 from app.models.currency import Currency
@@ -19,6 +34,19 @@ from app.models.rbac import (
     User,
     UserRoleAssignment,
 )
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Fail closed: an unapproved or unconfigured test database aborts the whole run before any test starts.
+    (Collection-only runs never touch the database, so they are allowed.)"""
+    if config.getoption("collectonly", default=False):
+        return
+    if APPROVED_TEST_DATABASE is None:
+        pytest.exit(
+            "REFUSING TO RUN THE TEST SUITE: no approved disposable test database.\n"
+            f"{_TEST_DATABASE_CONFIG_ERROR}\nSee docs/TEST_DATABASE_SAFETY.md.",
+            returncode=4,
+        )
 
 
 @pytest_asyncio.fixture(autouse=True)
@@ -44,8 +72,9 @@ async def _clean_database(_reset_engine_pool: None) -> AsyncGenerator[None, None
     keep fixtures like Currency (natural PK, e.g. 'USD') idempotent.
     """
     async with AsyncSessionLocal() as session:
-        await session.execute(
-            text(
+        await guarded_truncate(
+            session, APPROVED_TEST_DATABASE,
+            statement=(
                 "TRUNCATE TABLE audit_events, import_issues, import_batches, "
                 "bank_statement_transactions, "
                 "reconciliation_open_items, reconciliation_match_suggestions, "
@@ -63,7 +92,8 @@ async def _clean_database(_reset_engine_pool: None) -> AsyncGenerator[None, None
                 "fx_rates, user_role_assignments, "
                 "permissions, roles, business_units, legal_entities, groups, "
                 "currencies, users RESTART IDENTITY CASCADE"
-            )
+            ),
+            engine_url=engine.url,
         )
         await session.commit()
     yield
