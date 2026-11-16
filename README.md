@@ -163,13 +163,18 @@ uvicorn app.main:app --reload --port 8000
 - API docs: http://localhost:8000/api/v1/docs
 - Health check: http://localhost:8000/health
 
-Run tests:
+Run tests (the suite is **destructive** - it truncates tables before every test - so it refuses to run unless
+it is pointed at an explicitly configured, marked, disposable database; see
+[docs/TEST_DATABASE_SAFETY.md](docs/TEST_DATABASE_SAFETY.md) for the one-time setup):
 
 ```bash
-pytest -q
+cd backend
+export TREASURY_TEST_DATABASE_URL=postgresql+asyncpg://treasury:treasury@localhost:5432/treasury_os_test
+export TREASURY_TEST_CONFIRM_DESTRUCTIVE=treasury_os_test
+python -m pytest -q          # `python -m` is required; bare `pytest` cannot import the app
 ```
 
-325 tests across Stage 0-5D (facilities, funding actions, forecast
+The counts quoted below are historical snapshots from earlier stages. 325 tests across Stage 0-5D (facilities, funding actions, forecast
 engine, security/RBAC hardening, Excel Data Hub, investments, Stage
 3/4 financial-integrity/concurrency hardening passes, bank statement
 ingestion, the reconciliation data model, the deterministic matching
