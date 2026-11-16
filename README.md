@@ -18,6 +18,8 @@ Multi-entity, multi-currency Treasury Management System.
 | Stage 5C — Deterministic Bank Reconciliation Matching Engine | Complete |
 | Stage 5D — Advanced Matching (one-to-many, batch, internal transfer, FX) | Complete |
 | Stage 5E — Reconciliation Open-Item Workflow | Complete |
+| Stage 5E — Match-disposition integrity & duplicate-acceptance protection | Complete |
+| Stage 5E verification — fail-closed test-database guard, eligibility tests, migration pre-flight tests | Complete |
 | Stage 5F — Reconciliation Reports | **Not Started** |
 | Stage 5G — Adaptive Matching | **Not Started** |
 | Stage 5H — Full Reconciliation Frontend | **Not Started** |
@@ -69,6 +71,12 @@ report (e.g. `docs/STAGE_4_INVESTMENTS.md`,
   investment terms) are never overwritten in place - a change always
   creates a new version row, and the current record's own fields are the
   only thing endpoints read for "current" values.
+- **Reconciliation**: the matching engines only *propose* (Stage 5C one-to-one suggestions and Stage 5D grouped
+  matches, status `PENDING`). A proposal becomes reconciled only through an explicit, authorized accept decision,
+  and a transaction can be accepted through at most one proposal - enforced by database unique indexes, across
+  runs and under concurrent requests. Unresolved exceptions are tracked as open items with an append-only
+  history. Nothing in reconciliation creates or changes a `TreasuryTransaction`, `BankStatementTransaction` or
+  `BankBalance`. See `docs/RECONCILIATION_SCHEMA.md`.
 - **Financial calculations**: `Decimal` throughout, never floating point.
 
 ## Investment lifecycle (Stage 4)
@@ -100,6 +108,17 @@ carries its own transaction currency - never silently converted. RBAC is
 enforced at every layer (single-record, list, aggregate, Excel import,
 forecast) for every module, verified by dedicated cross-entity and
 cross-group regression tests throughout the test suite.
+
+## Documentation map
+
+| Topic | Document |
+|---|---|
+| Architecture, data model (foundation, Stage 1-2) | `ARCHITECTURE.md`, `DOMAIN_MODEL.md`, `TREASURY_DATA_MODEL.md`, `EXCEL_DATA_HUB.md` |
+| Forecast | `FORECAST_ENGINE.md`, `FORECAST_METHODOLOGY.md`, `FORECAST_DATA_SOURCES.md` |
+| Funding & facilities, investments (Stage 3-4) | `docs/STAGE_3_FUNDING_CREDIT_FACILITIES.md`, `docs/STAGE_4_INVESTMENTS.md` |
+| Bank reconciliation (Stage 5A-5E) | `docs/STAGE_5A_*` to `docs/STAGE_5E_*`; schema overview in `docs/RECONCILIATION_SCHEMA.md` |
+| Running the tests safely | `docs/TEST_DATABASE_SAFETY.md` |
+| Build order and what is deferred | `DEVELOPMENT_ROADMAP.md` |
 
 ## Prerequisites
 
@@ -174,14 +193,11 @@ export TREASURY_TEST_CONFIRM_DESTRUCTIVE=treasury_os_test
 python -m pytest -q          # `python -m` is required; bare `pytest` cannot import the app
 ```
 
-The counts quoted below are historical snapshots from earlier stages. 325 tests across Stage 0-5D (facilities, funding actions, forecast
-engine, security/RBAC hardening, Excel Data Hub, investments, Stage
-3/4 financial-integrity/concurrency hardening passes, bank statement
-ingestion, the reconciliation data model, the deterministic matching
-engine, and advanced grouped/FX matching) - all passing as of this
-stage. Run `pytest --collect-only -q` for the exact current collected
-count rather than relying on this figure, which is a point-in-time
-snapshot.
+480 tests are collected as of the Stage 5E verification work (run `python -m pytest --collect-only -q` for the
+current count; this figure is a point-in-time snapshot). They cover the foundation, Excel Data Hub, forecast engine,
+RBAC/entity-isolation hardening, facilities, funding actions and investments, the bank-reconciliation stages 5A-5E
+(ingestion, data model, deterministic and advanced/FX matching, open items, explicit match decisions, duplicate-
+acceptance protection), the test-database safety guard and the accepted-claims migration pre-flight.
 
 ## 3. Frontend setup
 
@@ -274,27 +290,19 @@ tagged `source_type="DEMO_DATA"` — never presented as real financial data.
 
 ## What's NOT implemented yet
 
-Bank reconciliation ADVANCED matching (one-to-many, many-to-one, batch
-Adaptive learning/AI matching, open-item workflow, reconciliation
-reports, intercompany reconciliation, working capital, KPIs/reports
-beyond what's listed in each stage's own doc, tasks/workflow, and the AI
-Treasury Copilot are out of scope — see `DEVELOPMENT_ROADMAP.md` for the
-planned build order. Stage 5A (Bank Statement Ingestion &
-Normalization), Stage 5B (Reconciliation Data Model), Stage 5C (a
-deterministic one-to-one matching engine), and Stage 5D (advanced
-grouped matching — one-to-many, many-to-one, batch payments, internal
-transfers, and evidence-based FX matching with full rate-selection
-provenance) are all complete — see
-`docs/STAGE_5A_BANK_STATEMENT_INGESTION.md`,
-`docs/STAGE_5B_RECONCILIATION_DATA_MODEL.md`,
-`docs/STAGE_5C_DETERMINISTIC_MATCHING_ENGINE.md`, and
-`docs/STAGE_5D_ADVANCED_MATCHING.md`, with Stage 5E (open-item work queue) documented in
-`docs/STAGE_5E_OPEN_ITEM_WORKFLOW.md`. Executing a reconciliation run now
-produces real `ReconciliationMatchSuggestion` rows (one-to-one) and
-`ReconciliationMatchGroup` rows (advanced grouped matches) against
-`TreasuryTransaction`, but nothing yet turns those into a human
-workflow, a report, or a learned/adaptive process; that begins at Stage
-5E. Each completed stage's own
+Out of scope so far (see `DEVELOPMENT_ROADMAP.md` for the planned build order): Stage 5F reconciliation reports,
+Stage 5G adaptive / AI matching, Stage 5H the full reconciliation frontend, Stage 5I final reconciliation
+hardening, intercompany reconciliation, working capital, KPIs/reports beyond what each stage's own doc lists,
+tasks/workflow, and the AI Treasury Copilot.
+
+Bank reconciliation Stages 5A-5E are complete: statement ingestion, the data model, deterministic one-to-one
+matching, advanced grouped and FX matching, and the human workflow on top of them - an open-item work queue
+(`/reconciliation/open-items`), a match-review queue where proposals are explicitly accepted or rejected
+(`/reconciliation/match-review`), and database-enforced protection against accepting a transaction twice. Still
+deferred inside Stage 5E: evidence file upload (evidence is a text reference only), bulk assignment, exports,
+revoking a decision, and choosing one candidate out of a tie. See `docs/STAGE_5E_OPEN_ITEM_WORKFLOW.md`.
+
+Each completed stage's own
 `docs/STAGE_N_*.md`
 lists that stage's specific known limitations in detail (e.g. investment
 periodic-interest forecast SCHEDULES are implemented for MONTHLY/
@@ -316,7 +324,7 @@ automated covenant-vs-forecast projection for facilities yet either).
   Treasury Copilot module is built.
 - Redis/Celery are configured but nothing uses them yet; no separate setup
   is required until a background-job module is added.
-- The dev setup here uses one Postgres database for both the app and the
-  test suite (tests truncate their tables before each test run). Use a
-  separate `treasury_os_test` database if you want the two fully
-  isolated.
+- The test suite is destructive (it truncates tables before every test) and **refuses to run against the
+  application database**. Create a separate, marked disposable database and set
+  `TREASURY_TEST_DATABASE_URL` and `TREASURY_TEST_CONFIRM_DESTRUCTIVE`; the tests no longer read `DATABASE_URL`.
+  Full setup: [docs/TEST_DATABASE_SAFETY.md](docs/TEST_DATABASE_SAFETY.md).

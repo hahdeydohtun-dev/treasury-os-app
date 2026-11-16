@@ -408,10 +408,21 @@ source, no inversion/triangulation). See
 
 ### Stage 5E — Reconciliation Open-Item Workflow (delivered)
 
-Open items are derived automatically from each run (idempotent, savepoint-atomic), shown as an
-actionable-by-default work queue, and worked through assign → investigate → resolve → close / reject /
-reopen with an append-only history and per-action audit events. See
-`docs/STAGE_5E_OPEN_ITEM_WORKFLOW.md`. Evidence file upload, bulk assignment and exports are deferred.
+- **Open-item workflow:** open items are derived automatically from each run (idempotent, savepoint-atomic), shown
+  as an actionable-by-default work queue, and worked through assign → investigate → resolve → close / reject /
+  reopen with an append-only history and per-action audit events.
+- **Match-disposition integrity:** `PENDING` proposals are no longer treated as reconciled. Accepting or rejecting
+  a proposal is an explicit, authorized, audited decision (`APPROVE`), made in a separate match-review queue; a
+  rejection returns the transactions to the exceptions queue.
+- **Duplicate-acceptance protection:** a transaction can be accepted through at most one proposal, across runs
+  and under concurrent requests, enforced by partial unique indexes on `reconciliation_accepted_claims`
+  (migration `d5e508d02a28`, with a pre-flight that refuses to migrate conflicting history).
+- **Verification work:** a fail-closed test-database guard (the destructive suite refuses to run unless pointed
+  at an explicitly marked disposable database), runtime eligibility tests (entity / account / currency) and an
+  automated migration pre-flight test on disposable databases. See `docs/TEST_DATABASE_SAFETY.md`.
+
+Detail: `docs/STAGE_5E_OPEN_ITEM_WORKFLOW.md`; schema map: `docs/RECONCILIATION_SCHEMA.md`. Deferred: evidence file
+upload, bulk assignment, exports, revoking a decision, choosing one candidate out of a tie.
 
 ### Stage 5F onward (not started)
 

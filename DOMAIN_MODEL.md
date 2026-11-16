@@ -196,7 +196,7 @@ UserRoleAssignment ──► Group (nullable)
 AuditEvent ──► User (nullable, who performed the action)
 ```
 
-## Stage 2 tables
+## Stage 1 tables
 
 Full column-level detail for these lives in `TREASURY_DATA_MODEL.md`
 (domain tables) and `EXCEL_DATA_HUB.md` (ingestion tables). Summary:
@@ -267,3 +267,10 @@ ForecastLine ──► (ExpectedCollection | ExpectedPayment | RecurringCashFlow
                    TreasuryTransaction | ForecastAdjustment)  via source_type + source_id,
                   i.e. every forecast amount traces back to the record that produced it
 ```
+
+## Later stages
+
+This document describes the foundation and the Stage 1-2 tables. Later stages document their own tables:
+Stage 3 `docs/STAGE_3_FUNDING_CREDIT_FACILITIES.md`, Stage 4 `docs/STAGE_4_INVESTMENTS.md`, and the bank-
+reconciliation stages 5A-5E in `docs/STAGE_5*_*.md`, with a one-page map of all reconciliation tables and their
+constraints in `docs/RECONCILIATION_SCHEMA.md`.
