@@ -3,6 +3,7 @@ Stage 5F authorization: scope is derived on the server from the caller's permiss
 narrow a result; they can never widen it.
 """
 import json
+import re
 
 import pytest
 
@@ -31,7 +32,9 @@ async def test_entity_a_never_sees_entity_b_in_any_report(client, db_session, de
         blob = json.dumps(body)
         assert body["scope"]["entities"] == [f"{mine['entity_name']} ({mine['entity_code']})"]
         assert theirs["entity_name"] not in blob and theirs["entity_code"] not in blob
-        assert "eb-" not in blob if mine is a else "ea-" not in blob           # the other entity's transaction references
+        # The other entity's transaction references look like "eb-B1" / "ea-L3". The uppercase B/L means this can never match
+        # inside a (lowercase-hex) UUID; a plain "eb-" substring did, by chance, in roughly 9-17% of runs.
+        assert not re.search(rf"{'eb' if mine is a else 'ea'}-[BL]\d", blob)
 
 
 async def test_entity_scoped_numbers_equal_the_single_entity_numbers(client, db_session, demo_group_and_entities, cash_event_types):
