@@ -296,6 +296,11 @@ export const api = {
     request<{ status: string; already_decided: boolean }>(
       `/reconciliation/match-proposals/${kind}/${id}/${action}`,
       { method: "POST", body: JSON.stringify({ reason: reason ?? null }) }, token),
+  listReconciliationReports: (token: string) => request<ReportCatalogEntry[]>("/reconciliation/reports", {}, token),
+  getReconciliationReport: (token: string, name: string, query: string) =>
+    request<ReportResult>(`/reconciliation/reports/${name}${query ? `?${query}` : ""}`, {}, token),
+  reconciliationReportExportUrl: (name: string, format: "xlsx" | "pdf", query: string) =>
+    `${API_BASE_URL}/reconciliation/reports/${name}/export?format=${format}${query ? `&${query}` : ""}`,
   listReconciliationMatchGroups: (token: string, runId: string) =>
     request<ReconciliationMatchGroupOut[]>(`/reconciliation/runs/${runId}/match-groups`, {}, token),
   listReconciliationConfigurations: (token: string, params?: Record<string, string>) =>
@@ -853,6 +858,23 @@ export interface MatchReviewSummary {
   pending_groups: number;
   open_exceptions: number;
 }
+
+export interface ReportColumn { key: string; label: string; align: "left" | "right" }
+export interface ReportDrill { report: string; params: Record<string, string> }
+export interface ReportKpi {
+  key: string; label: string; value: string | number | null; definition: string; source: string; drilldown: ReportDrill | null;
+}
+export interface ReportTable {
+  key: string; title: string; columns: ReportColumn[]; rows: Record<string, string | number | null | ReportDrill>[];
+  total_rows: number; page: number | null; page_size: number | null; note: string | null;
+}
+export interface ReportResult {
+  report: string; title: string; generated_at: string; level: string; as_of: string; timezone: string;
+  reporting_period: { from: string; to: string; applies: boolean };
+  scope: { entities: string[]; accounts: string; currency: string };
+  filters: Record<string, unknown>; kpis: ReportKpi[]; tables: ReportTable[]; notes: string[]; definitions: string[];
+}
+export interface ReportCatalogEntry { key: string; title: string; description: string; exportable: boolean }
 
 export interface ReconciliationConfigurationOut {
   id: string;

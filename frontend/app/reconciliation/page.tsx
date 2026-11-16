@@ -99,6 +99,10 @@ export default function ReconciliationPage() {
         <Link href="/reconciliation/match-review" style={{ color: "var(--color-accent)" }}>
           Match review (proposals awaiting a decision) →
         </Link>
+        {" · "}
+        <Link href="/reconciliation/reports" style={{ color: "var(--color-accent)" }}>
+          Reports (summaries, ageing, exports) →
+        </Link>
       </p>
         <p>
           Please <Link href="/login">sign in</Link> to view reconciliation runs.

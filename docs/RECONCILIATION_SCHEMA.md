@@ -11,6 +11,7 @@ detail and the rationale:
 | 5C deterministic matching | `STAGE_5C_DETERMINISTIC_MATCHING_ENGINE.md` |
 | 5D advanced / FX matching | `STAGE_5D_ADVANCED_MATCHING.md` |
 | 5E open items, decisions, duplicate-acceptance protection | `STAGE_5E_OPEN_ITEM_WORKFLOW.md` |
+| 5F reports and exports (read-only, no tables of its own) | `STAGE_5F_RECONCILIATION_REPORTS.md` |
 | Test database safety | `TEST_DATABASE_SAFETY.md` |
 
 Facts below were taken from the models and migrations at the Stage 5E verification state (Alembic head
@@ -87,7 +88,7 @@ ReconciliationOpenItem  ◄── derived idempotently per run from unmatched / 
 ## API and pages
 
 * API prefixes: `/reconciliation` (runs, configurations, suggestions, groups), `/reconciliation/open-items`,
-  `/reconciliation/match-proposals`. Endpoint tables are in the Stage 5B and 5E documents.
+  `/reconciliation/match-proposals`, `/reconciliation/reports` (Stage 5F, read-only). Endpoint tables are in the Stage 5B and 5E documents.
 * Frontend pages: `/reconciliation` (runs), `/reconciliation/open-items` (exceptions work queue) and
-  `/reconciliation/match-review` (proposals awaiting a decision). The full reconciliation frontend is Stage 5H and
-  is not built.
+  `/reconciliation/match-review` (proposals awaiting a decision) and `/reconciliation/reports` (Stage 5F reports and
+  exports). The full reconciliation frontend is Stage 5H and is not built.

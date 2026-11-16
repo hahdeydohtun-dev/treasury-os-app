@@ -18,6 +18,7 @@ from app.api.v1 import (
     investments,
     reconciliation,
     reconciliation_match_proposals,
+    reconciliation_reports,
     reconciliation_open_items,
     transactions,
 )
@@ -37,6 +38,7 @@ api_router.include_router(bank_statements.router)
 api_router.include_router(reconciliation.router)
 api_router.include_router(reconciliation_open_items.router)
 api_router.include_router(reconciliation_match_proposals.router)
+api_router.include_router(reconciliation_reports.router)
 api_router.include_router(forecast.router)
 api_router.include_router(facilities.router)
 api_router.include_router(funding.router)

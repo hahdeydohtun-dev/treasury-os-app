@@ -424,9 +424,21 @@ source, no inversion/triangulation). See
 Detail: `docs/STAGE_5E_OPEN_ITEM_WORKFLOW.md`; schema map: `docs/RECONCILIATION_SCHEMA.md`. Deferred: evidence file
 upload, bulk assignment, exports, revoking a decision, choosing one candidate out of a tie.
 
-### Stage 5F onward (not started)
+### Stage 5F — Reconciliation Reports (delivered)
 
-- Reconciliation reports; adaptive matching; full reconciliation frontend
+- Read-only reports over Stage 5A-5E data: run summary, matching performance, open exceptions, open-item ageing, assignment and
+  investigation, bank-account reconciliation, and entity / group dashboards, with Excel and PDF exports.
+- Counting rules: each transaction is counted once in exactly one bucket (accepted / proposed only / unmatched); proposals and
+  exceptions are counted separately; pending proposals are never counted as reconciled; money is shown per currency and never
+  converted or summed across currencies.
+- Ageing and assignment history are rebuilt from the Stage 5E event history as of a stated date (UTC), never inferred from current status.
+- Server-side entity scope for every report and export, formula-injection-safe exports with masked account numbers, and an audit
+  record per generation and export. No migration; one new dependency (`reportlab`).
+- Detail: `docs/STAGE_5F_RECONCILIATION_REPORTS.md`. Deferred: charts, scheduled reports, currency consolidation.
+
+### Stage 5G onward (not started)
+
+- Adaptive matching; full reconciliation frontend; final reconciliation hardening
 
 ## Stage 6 — Intercompany Reconciliation
 
