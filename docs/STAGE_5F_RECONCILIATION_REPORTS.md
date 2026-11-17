@@ -51,10 +51,23 @@ non-3-letter currency). Default reporting period: the last 30 days ending today 
 * **Each eligible transaction is in exactly one bucket**, so it is counted once however many proposals or groups
   mention it:
   * *accepted*: it has an accepted claim (bank rows: `MATCH`; ledger rows: `MATCH` or `TRANSFER`);
-  * *proposed only*: not accepted, and covered by a `PENDING` suggestion or group;
+  * *proposed only*: not accepted, and covered by an **actionable** pending proposal, i.e. one the Stage 5E
+    match-review queue can actually accept or reject: an unambiguous auto-tier suggestion (the Stage 5E predicate
+    `_suggestion_pending_decidable`, reused rather than redefined) or a `PENDING` group;
   * *unmatched*: neither.
 
   `accepted + proposed + unmatched = eligible`, per side, always (asserted by tests).
+* **Pending suggestions that are not actionable** (review tier, a competing-candidate tie, or an incomplete candidate)
+  remain exceptions to investigate under Stage 5E. They are never described as awaiting a decision: their transactions
+  are *unmatched*, and are reported separately as *under investigation* (a subset of unmatched, not a fourth bucket).
+  The pending-proposal counts and the proposed-only buckets use this same definition, so they always agree.
+* **Rejected** proposals stay rejected: they never count as accepted, and their transactions are unmatched.
+* **Run-specific attribution (run summary).** A run's figures come from that run's own records: accepted = a claim
+  created by one of the run's own decisions (linked through the decision's `reconciliation_run_id`); proposed = the
+  run's own actionable pending suggestions and `PENDING` groups. A transaction accepted or proposed in a *different*
+  run over the same account and an overlapping period is not inherited. The cross-run reports (matching performance,
+  bank accounts, dashboards) deliberately classify each transaction once across all runs: accepted if an accepted
+  claim exists anywhere, proposed if an actionable pending proposal exists anywhere.
 * **Decision counts vs unique transaction counts** are shown side by side in the matching report and are **not**
   additive: one ledger row can be in an accepted one-to-many group and an accepted internal-transfer pairing. Only the
   de-duplicated totals may be summed. Per-type unique counts are not mutually exclusive.
@@ -68,8 +81,8 @@ non-3-letter currency). Default reporting period: the last 30 days ending today 
 
 | Report | Main figures |
 |---|---|
-| Run summary | Per run (periods overlapping the reporting period): reference, entity, masked account, currency, period, created / executed dates, status, bank and ledger rows in scope, accepted / proposed / unmatched per side, pending and rejected proposals, exceptions by status. Run rows are never summed. Pending proposals use the match-review predicate (an unambiguous auto-tier suggestion still `PENDING`, or a `PENDING` group). |
-| Matching performance | Decision counts and unique transactions by type (one-to-one, one-to-many, many-to-one, batch, internal transfer, FX), pending and rejected proposals, the three-bucket table, and per-currency amounts (bank and ledger separately). |
+| Run summary | Per run (periods overlapping the reporting period): reference, entity, masked account, currency, period, created / executed dates, status, bank and ledger rows in scope, accepted / proposed / unmatched per side (attributed to that run only), pending and rejected proposals, pending suggestions under investigation (with the bank and ledger rows they leave unmatched), exceptions by status. Run rows are never summed. Pending proposals use the match-review predicate (an unambiguous auto-tier suggestion still `PENDING`, or a `PENDING` group). |
+| Matching performance | Decision counts and unique transactions by type (one-to-one, one-to-many, many-to-one, batch, internal transfer, FX), pending and rejected proposals, the three-bucket table (with the "of which under investigation" subset of unmatched), and per-currency amounts (bank and ledger separately). |
 | Open exceptions | Reference (`EXC-…`), entity, masked account, transaction reference and date, amount, currency, category, status, assignee, opened date, last investigation, age, notes indicator, resolution date. Default statuses: `OPEN`, `UNDER_REVIEW`. |
 | Ageing | Outstanding items per band (0–7, 8–14, 15–30, 31–60, more than 60 days) with assigned / unassigned, amounts per currency, and ageing by account, entity and category. |
 | Assignment | Assigned / unassigned outstanding items, items by team member and status, average resolution time, oldest outstanding items, outstanding items with no investigation activity, reopened items. |
@@ -160,6 +173,9 @@ what the user may see.
 * **Decision counts are not currency-filterable** (a decision belongs to a run, not a currency); the currency filter
   limits the accounts and transactions instead.
 * **Unreconciled accounts** have blank exception figures by design (see section 4).
+* **A proposal that conflicts with an acceptance in another run** (Stage 5E refuses to accept it) still counts as awaiting a
+  decision in its own run until someone rejects it; its detail screen shows the conflict.
+* **Cross-run reports classify per transaction, not per run**, by design; use the run summary for per-run attribution.
 * **PDF tables use small type** to fit wide reports; the Excel export is the better format for analysis.
 * **A denied or failed view is not audited**, only exports are.
 * **Frontend lint** (`next lint`) is not configured in the repository, so only the production build and `tsc` were run.
@@ -169,11 +185,13 @@ what the user may see.
 
 Run with the documented disposable test database (`docs/TEST_DATABASE_SAFETY.md`) on PostgreSQL 16.15:
 
-* 85 new tests in `tests/test_reconciliation_reports_{calculations,authorization,exports,audit_and_integrity}.py`
-  (calculations 29, authorization 16, exports 35, audit and integrity 5). Expected figures were derived by hand from a
+* 92 tests in `tests/test_reconciliation_reports_{calculations,authorization,exports,audit_and_integrity}.py`
+  (calculations 29, authorization 16, exports 35, audit and integrity 5) and
+  `tests/test_reconciliation_reports_integrity_corrections.py` (7: run-specific attribution, pending-proposal semantics
+  checked against the real Stage 5E match-review endpoints). Expected figures were derived by hand from a
   scenario built through the real Stage 5E API (accepted one-to-one, one-to-many and internal-transfer matches, a
   pending and a rejected proposal, a transaction in two accepted proposals, two currencies, a reversed row, an
   out-of-period row).
-* The full suite (565 tests: 480 existing + 85 new) passes. The existing Stage 5A–5E tests are unchanged.
+* The full suite (572 tests) passes. The existing Stage 5A–5E tests are unchanged.
 * Mutation checks: disabling the formula-injection defence, the EXPORT permission check, the account scope, the
   open-item scope, or counting a pending proposal as accepted each caused tests to fail.

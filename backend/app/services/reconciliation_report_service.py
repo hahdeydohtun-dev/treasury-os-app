@@ -15,9 +15,16 @@ COUNTING RULES (the same everywhere; see docs/STAGE_5F_RECONCILIATION_REPORTS.md
 * Each eligible transaction falls into EXACTLY ONE bucket, so a transaction is never counted twice however many
   proposals or groups mention it:
     accepted   - it has an accepted claim (bank: MATCH; ledger: MATCH or TRANSFER)
-    proposed   - not accepted, and a PENDING proposal (suggestion or group) covers it
-    unmatched  - neither
+    proposed   - not accepted, and an ACTIONABLE pending proposal covers it: a pending suggestion the Stage 5E match-review
+                 queue can accept or reject (the Stage 5E predicate, reused), or a PENDING group
+    unmatched  - neither. This includes rows covered only by a NON-ACTIONABLE pending suggestion (review tier, a
+                 competing-candidate tie, an incomplete candidate): Stage 5E treats those as exceptions to investigate,
+                 so they are not "awaiting a decision". They are reported separately as `investigating`, a subset of unmatched.
   accepted + proposed + unmatched == eligible, per side, always.
+* Run-specific attribution (run summary only): a run's accepted claims are those created by that run's own decisions, and
+  its proposed rows come from that run's own suggestions and groups, so a transaction accepted or proposed in another run
+  over the same account and an overlapping period is never inherited. The cross-run reports (matching performance, bank
+  accounts, dashboards) deliberately classify each transaction once across all runs.
 * Proposals are counted separately from transactions (decision/group counts vs unique transaction counts) and the
   per-type figures are NOT additive: one ledger row can be in a one-to-one match and an internal-transfer pairing.
 * Completion rate = (accepted bank + accepted ledger) / (eligible bank + eligible ledger), as a percentage; undefined
@@ -47,6 +54,7 @@ from sqlalchemy import (
     case,
     cast,
     exists,
+    false,
     func,
     literal,
     or_,
@@ -335,48 +343,92 @@ async def load_accounts(db: AsyncSession, scope: ReportScope, filters: ReportFil
 
 
 def _empty_side() -> dict[str, int]:
-    return {"total": 0, "accepted": 0, "proposed": 0, "unmatched": 0}
+    # `investigating` is a SUBSET of `unmatched`: unmatched rows that a non-actionable pending suggestion points at.
+    return {"total": 0, "accepted": 0, "proposed": 0, "unmatched": 0, "investigating": 0}
+
+
+def _actionable_pending_suggestion():
+    """A PENDING suggestion the Stage 5E match-review queue can actually accept or reject. This IS the Stage 5E predicate
+    (`_suggestion_pending_decidable`), reused - not a second definition: a real bank-to-ledger candidate, auto-tier, with
+    no competing live candidate for the same bank row in its run."""
+    return _pending_decidable()
+
+
+def _non_actionable_pending_suggestion():
+    """A PENDING suggestion with a real ledger candidate that is NOT decidable (review tier, a competing-candidate tie, or an
+    incomplete candidate). Stage 5E treats these as exceptions to investigate, so they are not 'awaiting a decision'.
+    NULL-safe: a suggestion whose decidability cannot be established as true is not decidable."""
+    S = ReconciliationMatchSuggestion
+    return and_(S.status == MatchSuggestionStatus.PENDING, S.treasury_transaction_id.is_not(None),
+                ~func.coalesce(_actionable_pending_suggestion(), false()))
 
 
 async def population(
     db: AsyncSession, scope: ReportScope, account_ids: list[uuid.UUID], date_from: datetime.date,
-    date_to: datetime.date, currency: str | None,
+    date_to: datetime.date, currency: str | None, run: ReconciliationRun | None = None,
 ) -> dict[uuid.UUID, dict[str, Any]]:
-    """Per account: bank and ledger bucket counts (accepted / proposed / unmatched) and per-currency amounts."""
+    """
+    Per account: bank and ledger bucket counts (accepted / proposed / unmatched, plus `investigating` within unmatched) and
+    per-currency amounts.
+
+    Without `run` the classification is by TRANSACTION across all runs: accepted = an accepted claim exists anywhere;
+    proposed = an actionable PENDING proposal exists anywhere. With `run` every classification is attributed to THAT run only:
+    accepted = a claim created by one of that run's own decisions; proposed = an actionable pending suggestion or a PENDING
+    group of that run. A transaction accepted or proposed in another run over the same account and an overlapping period is
+    therefore NOT inherited. In both modes a transaction is in exactly one of accepted / proposed / unmatched.
+    """
     out: dict[uuid.UUID, dict[str, Any]] = {a: {"bank": _empty_side(), "ledger": _empty_side(), "amounts": {}} for a in account_ids}
     if not account_ids:
         return out
-    S, G, M, C = ReconciliationMatchSuggestion, ReconciliationMatchGroup, ReconciliationMatchGroupMember, ReconciliationAcceptedClaim
+    S, G, M, C, D = (ReconciliationMatchSuggestion, ReconciliationMatchGroup, ReconciliationMatchGroupMember,
+                     ReconciliationAcceptedClaim, ReconciliationMatchDecision)
+    run_id = run.id if run is not None else None
 
-    def pending_bank(col):
-        return or_(
-            exists().where(S.bank_statement_transaction_id == col, S.treasury_transaction_id.is_not(None), S.status == MatchSuggestionStatus.PENDING),
-            exists().where(M.bank_statement_transaction_id == col, M.match_group_id == G.id, G.status == MatchGroupStatus.PENDING))
+    def accepted(*claim_conditions):
+        conditions = list(claim_conditions)
+        if run_id is not None:       # attribute the claim to the run through the decision that created it
+            conditions += [C.decision_id == D.id, D.reconciliation_run_id == run_id]
+        return exists().where(*conditions)
 
-    def pending_ledger(col):
-        return or_(
-            exists().where(S.treasury_transaction_id == col, S.status == MatchSuggestionStatus.PENDING),
-            exists().where(M.treasury_transaction_id == col, M.match_group_id == G.id, G.status == MatchGroupStatus.PENDING))
+    def suggestion(*conditions):
+        conditions = list(conditions)
+        if run_id is not None:
+            conditions.append(S.reconciliation_run_id == run_id)
+        return exists().where(*conditions)
+
+    def group(*conditions):
+        conditions = list(conditions) + [M.match_group_id == G.id, G.status == MatchGroupStatus.PENDING]
+        if run_id is not None:
+            conditions.append(G.reconciliation_run_id == run_id)
+        return exists().where(*conditions)
+
+    actionable, non_actionable = _actionable_pending_suggestion(), _non_actionable_pending_suggestion()
 
     B, T = BankStatementTransaction, TreasuryTransaction
-    for side, model, acct_col, cur_col, amt_col, date_col, status_clause, accepted, proposed in (
+    for side, model, acct_col, cur_col, amt_col, date_col, status_clause, is_accepted, is_proposed, is_investigating in (
         ("bank", B, B.bank_account_id, B.currency_code, B.amount, B.transaction_date, B.status == BankStatementTransactionStatus.ACTIVE,
-         exists().where(C.bank_statement_transaction_id == B.id, C.claim_kind == AcceptedClaimKind.MATCH), pending_bank(B.id)),
+         accepted(C.bank_statement_transaction_id == B.id, C.claim_kind == AcceptedClaimKind.MATCH),
+         or_(suggestion(S.bank_statement_transaction_id == B.id, actionable), group(M.bank_statement_transaction_id == B.id)),
+         suggestion(S.bank_statement_transaction_id == B.id, non_actionable)),
         ("ledger", T, T.bank_account_id, T.transaction_currency_code, T.transaction_amount, T.event_date, T.status == TransactionStatus.POSTED,
-         exists().where(C.treasury_transaction_id == T.id), pending_ledger(T.id)),
+         accepted(C.treasury_transaction_id == T.id),
+         or_(suggestion(S.treasury_transaction_id == T.id, actionable), group(M.treasury_transaction_id == T.id)),
+         suggestion(S.treasury_transaction_id == T.id, non_actionable)),
     ):
-        prop_only = and_(~accepted, proposed)
-        stmt = (select(acct_col, cur_col, func.count(), func.count().filter(accepted), func.count().filter(prop_only),
-                       func.coalesce(func.sum(amt_col), 0), func.coalesce(func.sum(amt_col).filter(accepted), 0),
+        prop_only = and_(~is_accepted, is_proposed)
+        investigating = and_(~is_accepted, ~is_proposed, is_investigating)
+        stmt = (select(acct_col, cur_col, func.count(), func.count().filter(is_accepted), func.count().filter(prop_only),
+                       func.count().filter(investigating),
+                       func.coalesce(func.sum(amt_col), 0), func.coalesce(func.sum(amt_col).filter(is_accepted), 0),
                        func.coalesce(func.sum(amt_col).filter(prop_only), 0))
                 .where(status_clause, acct_col.in_(account_ids), date_col >= date_from, date_col <= date_to)
                 .group_by(acct_col, cur_col))
         stmt = scope.apply(stmt, model.legal_entity_id)
         if currency:
             stmt = stmt.where(cur_col == currency)
-        for acct, cur, total, acc, prop, s_total, s_acc, s_prop in (await db.execute(stmt)).all():
+        for acct, cur, total, acc, prop, inv, s_total, s_acc, s_prop in (await db.execute(stmt)).all():
             entry = out[acct]
-            for k, v in (("total", total), ("accepted", acc), ("proposed", prop), ("unmatched", total - acc - prop)):
+            for k, v in (("total", total), ("accepted", acc), ("proposed", prop), ("unmatched", total - acc - prop), ("investigating", inv)):
                 entry[side][k] += v
             amounts = entry["amounts"].setdefault(cur, {})
             for k, v in (("accepted", s_acc), ("proposed", s_prop), ("unmatched", Decimal(s_total) - Decimal(s_acc) - Decimal(s_prop)), ("total", s_total)):
@@ -465,8 +517,10 @@ async def run_summary_report(db, scope, filters) -> dict[str, Any]:
     R = ReconciliationRun
     result = await new_result(db, scope, filters, report="run-summary", title="Reconciliation Run Summary", definitions=[
         "A run reconciles one bank account over one period. Eligible bank rows are ACTIVE statement rows; eligible ledger rows are POSTED ledger rows, both inside the run's entity, account and period.",
-        "Accepted = the transaction has an accepted claim. Proposed = not accepted but covered by a PENDING proposal. Unmatched = neither. The three always add up to the eligible count.",
-        "Pending proposals are proposals awaiting an explicit decision (the match-review queue); they are NOT counted as completed reconciliation. Rejected proposals are explicit rejections.",
+        "Every figure in a run's row is attributed to THAT run: accepted = a claim created by the run's own decisions; proposed = the run's own actionable pending suggestions and PENDING groups. A transaction accepted or proposed in another run over the same account and an overlapping period is not inherited.",
+        "Accepted = the transaction has an accepted claim from this run. Proposed = not accepted but covered by an ACTIONABLE pending proposal of this run. Unmatched = neither. The three always add up to the eligible count.",
+        "Actionable = what the Stage 5E match-review queue can accept or reject: an unambiguous auto-tier suggestion or a PENDING group. Pending proposals counts only these; they are NOT counted as completed reconciliation. Rejected proposals are explicit rejections and never count as accepted.",
+        "Pending suggestions that are NOT actionable (review-tier, a competing-candidate tie, an incomplete candidate) remain exceptions under investigation. They are shown separately (Pending under investigation, and Investigating per side, which is part of Unmatched) and are never described as awaiting a decision.",
         "Exceptions are open items, counted by their current status; they are a different thing from transactions and proposals and are not added to them.",
         "Runs shown are those whose reconciliation period overlaps the reporting period.",
     ])
@@ -491,11 +545,12 @@ async def run_summary_report(db, scope, filters) -> dict[str, Any]:
     rows = []
     totals = {"bank": 0, "ledger": 0, "accepted": 0, "pending": 0, "open": 0}
     for run, account, entity_name in (await db.execute(stmt)).all():
-        pop = (await population(db, scope, [run.bank_account_id], run.period_start, run.period_end, None))[run.bank_account_id]
+        pop = (await population(db, scope, [run.bank_account_id], run.period_start, run.period_end, None, run=run))[run.bank_account_id]
         pending = (await db.execute(select(func.count()).select_from(S).where(S.reconciliation_run_id == run.id, _pending_decidable()))).scalar_one() \
             + (await db.execute(select(func.count()).select_from(G).where(G.reconciliation_run_id == run.id, G.status == MatchGroupStatus.PENDING))).scalar_one()
         rejected = (await db.execute(select(func.count()).select_from(S).where(S.reconciliation_run_id == run.id, S.status == MatchSuggestionStatus.REJECTED))).scalar_one() \
             + (await db.execute(select(func.count()).select_from(G).where(G.reconciliation_run_id == run.id, G.status == MatchGroupStatus.REJECTED))).scalar_one()
+        investigation = (await db.execute(select(func.count()).select_from(S).where(S.reconciliation_run_id == run.id, _non_actionable_pending_suggestion()))).scalar_one()
         by_status = dict((await db.execute(select(I.status, func.count()).where(I.reconciliation_run_id == run.id).group_by(I.status))).all())
         rows.append({
             "id": str(run.id), "reference": short_ref("RUN", run.id), "entity": entity_name,
@@ -506,7 +561,8 @@ async def run_summary_report(db, scope, filters) -> dict[str, Any]:
             "accepted_bank": pop["bank"]["accepted"], "accepted_ledger": pop["ledger"]["accepted"],
             "unmatched_bank": pop["bank"]["unmatched"], "unmatched_ledger": pop["ledger"]["unmatched"],
             "proposed_bank": pop["bank"]["proposed"], "proposed_ledger": pop["ledger"]["proposed"],
-            "pending_proposals": pending, "rejected_proposals": rejected,
+            "pending_proposals": pending, "rejected_proposals": rejected, "pending_investigation": investigation,
+            "investigating_bank": pop["bank"]["investigating"], "investigating_ledger": pop["ledger"]["investigating"],
             "exceptions_open": by_status.get(OpenItemStatus.OPEN, 0), "exceptions_under_review": by_status.get(OpenItemStatus.UNDER_REVIEW, 0),
             "exceptions_resolved": by_status.get(OpenItemStatus.RESOLVED, 0), "exceptions_closed": by_status.get(OpenItemStatus.CLOSED, 0),
             "_drill": {"report": "exceptions", "params": {"bank_account_id": str(run.bank_account_id)}},
@@ -518,12 +574,14 @@ async def run_summary_report(db, scope, filters) -> dict[str, Any]:
             col("accepted_bank", "Accepted (bank)", "right"), col("accepted_ledger", "Accepted (ledger)", "right"),
             col("unmatched_bank", "Unmatched (bank)", "right"), col("unmatched_ledger", "Unmatched (ledger)", "right"),
             col("pending_proposals", "Pending proposals", "right"), col("rejected_proposals", "Rejected proposals", "right"),
-            col("exceptions_open", "Open", "right"), col("exceptions_under_review", "Under review", "right"),
+            col("pending_investigation", "Pending under investigation", "right"), col("investigating_bank", "Investigating (bank)", "right"),
+            col("investigating_ledger", "Investigating (ledger)", "right"), col("exceptions_open", "Open", "right"), col("exceptions_under_review", "Under review", "right"),
             col("exceptions_resolved", "Resolved", "right"), col("exceptions_closed", "Closed", "right")]
     result["kpis"] = [kpi("runs", "Runs in period", total, "Runs whose reconciliation period overlaps the reporting period (after filters).", "reconciliation_runs")]
     result["tables"] = [table("runs", "Runs", cols, rows, total_rows=total, page=filters.page if filters.paginate else None,
                               page_size=filters.page_size if filters.paginate else None)]
-    result["notes"] = ["Counts are unique transactions; a transaction is counted once however many proposals mention it. Run rows are not summed, because runs over overlapping periods would count the same transactions twice."]
+    result["notes"] = ["Counts are unique transactions; a transaction is counted once however many proposals mention it. Run rows are not summed, because runs over overlapping periods would count the same transactions twice.",
+                       "Each run is attributed its own decisions and proposals only. A proposal that conflicts with an acceptance made in another run still counts as awaiting a decision in its own run until someone rejects it."]
     return result
 
 
@@ -564,9 +622,10 @@ async def matching_performance_report(db, scope, filters) -> dict[str, Any]:
     result = await new_result(db, scope, filters, report="matching-performance", title="Matching Performance", definitions=[
         "Two different measures are shown and must not be added together. DECISION COUNTS count proposals (a suggestion or a group). UNIQUE TRANSACTION COUNTS count distinct bank/ledger rows, each once.",
         "The per-type figures are not mutually exclusive: one ledger row can be in a one-to-one match and also in an internal-transfer pairing, so only the 'any type' totals are de-duplicated and may be summed.",
-        "Accepted = explicit accept decision (claims table). Pending = proposal awaiting a decision (match-review queue); not a completed reconciliation. Rejected = explicit rejection.",
+        "Accepted = explicit accept decision (claims table). Pending = an ACTIONABLE proposal awaiting a decision, exactly what the Stage 5E match-review queue can accept or reject (an unambiguous auto-tier suggestion, or a PENDING group); not a completed reconciliation. Rejected = explicit rejection.",
+        "Pending suggestions that are NOT actionable (review tier, a competing-candidate tie, an incomplete candidate) are exceptions under investigation: they are not 'awaiting a decision', their transactions are unmatched, and they are shown separately as 'of which under investigation' (a subset of unmatched).",
         "Decision counts cover runs whose reconciliation period overlaps the reporting period; unique transaction counts cover transactions dated inside the reporting period.",
-        "Each eligible transaction is in exactly one bucket: accepted, proposed-only (pending proposal, not accepted) or unmatched.",
+        "Each eligible transaction is in exactly one bucket: accepted, proposed-only (actionable pending proposal, not accepted) or unmatched. Across runs a transaction is accepted if it has an accepted claim anywhere and proposed if an actionable pending proposal exists anywhere; per-run attribution is in the run summary.",
     ])
     accounts = await load_accounts(db, scope, filters)
     ids = [a["id"] for a in accounts]
@@ -614,14 +673,16 @@ async def matching_performance_report(db, scope, filters) -> dict[str, Any]:
     result["kpis"] = [
         kpi("eligible", "Eligible transactions (unique)", eligible, "ACTIVE bank rows + POSTED ledger rows dated in the period, each counted once.", "bank_statement_transactions, treasury_transactions"),
         kpi("accepted", "Accepted (unique transactions)", acc_total, "Eligible transactions with an accepted claim.", "reconciliation_accepted_claims"),
-        kpi("proposed", "Proposed only (unique transactions)", bank["proposed"] + ledger["proposed"], "Not accepted, covered by a PENDING proposal.", "reconciliation_match_suggestions, reconciliation_match_groups"),
-        kpi("unmatched", "Unmatched (unique transactions)", bank["unmatched"] + ledger["unmatched"], "Neither accepted nor covered by a pending proposal.", "derived"),
+        kpi("proposed", "Proposed only (unique transactions)", bank["proposed"] + ledger["proposed"], "Not accepted, covered by an actionable pending proposal (awaiting an explicit decision).", "reconciliation_match_suggestions, reconciliation_match_groups"),
+        kpi("unmatched", "Unmatched (unique transactions)", bank["unmatched"] + ledger["unmatched"], "Neither accepted nor covered by an actionable pending proposal.", "derived"),
+        kpi("investigating", "Of which under investigation", bank["investigating"] + ledger["investigating"], "Unmatched transactions that a non-actionable pending suggestion (review tier, tie, incomplete) points at; exceptions, not awaiting a decision.", "reconciliation_match_suggestions"),
         kpi("completion", "Completion rate (%)", pct(acc_total, eligible), "accepted unique transactions / eligible unique transactions x 100.", "derived"),
     ]
     result["tables"] = [
         table("types", "By match type (decision counts and unique transactions - not additive)", cols, rows),
         table("buckets", "Unique transactions by outcome (mutually exclusive; accepted + proposed + unmatched = eligible)",
-              [col("side", "Population"), col("total", "Eligible", "right"), col("accepted", "Accepted", "right"), col("proposed", "Proposed only", "right"), col("unmatched", "Unmatched", "right")], bucket_rows),
+              [col("side", "Population"), col("total", "Eligible", "right"), col("accepted", "Accepted", "right"), col("proposed", "Proposed only", "right"), col("unmatched", "Unmatched", "right"),
+               col("investigating", "Of which under investigation", "right")], bucket_rows),
         table("currencies", "Amounts by currency (bank and ledger shown separately; no conversion)",
               [col("currency", "Currency")] + [col(f"{side}_{k}", f"{side.title()} {k}", "right") for side in ("bank", "ledger") for k in ("total", "accepted", "proposed", "unmatched")], cur_rows),
     ]
@@ -1038,7 +1099,7 @@ async def overview_report(db, scope, filters) -> dict[str, Any]:
     accounts = await load_accounts(db, scope, filters)
     pending = await pending_by_type(db, scope, filters, [a["id"] for a in accounts])
     cards = _dash_kpis(metrics)
-    cards.insert(5, kpi("pending", "Proposals awaiting a decision", sum(pending.values()), "PENDING proposals in the match-review queue (not counted as reconciled).",
+    cards.insert(5, kpi("pending", "Proposals awaiting a decision", sum(pending.values()), "Actionable PENDING proposals in the match-review queue (not counted as reconciled).",
                         "reconciliation_match_suggestions, reconciliation_match_groups"))
     result["kpis"] = cards
     result["tables"] = [table("entities", "Entities", _DASH_COLS, _dash_rows(metrics))]
