@@ -18,7 +18,7 @@ COUNTING RULES (the same everywhere; see docs/STAGE_5F_RECONCILIATION_REPORTS.md
     proposed   - not accepted, and an ACTIONABLE pending proposal covers it: a pending suggestion the Stage 5E match-review
                  queue can accept or reject (the Stage 5E predicate, reused), or a PENDING group
     unmatched  - neither. This includes rows covered only by a NON-ACTIONABLE pending suggestion (review tier, a
-                 competing-candidate tie, an incomplete candidate): Stage 5E treats those as exceptions to investigate,
+                 competing-candidate tie, a 'no candidate found' placeholder or other incomplete suggestion): Stage 5E treats those as exceptions to investigate,
                  so they are not "awaiting a decision". They are reported separately as `investigating`, a subset of unmatched.
   accepted + proposed + unmatched == eligible, per side, always.
 * Run-specific attribution (run summary only): a run's accepted claims are those created by that run's own decisions, and
@@ -355,11 +355,19 @@ def _actionable_pending_suggestion():
 
 
 def _non_actionable_pending_suggestion():
-    """A PENDING suggestion with a real ledger candidate that is NOT decidable (review tier, a competing-candidate tie, or an
-    incomplete candidate). Stage 5E treats these as exceptions to investigate, so they are not 'awaiting a decision'.
+    """A PENDING suggestion that is NOT decidable and references at least one transaction: review tier, a competing-candidate
+    tie, or an INCOMPLETE suggestion in either direction. Stage 5E treats these as exceptions to investigate, so they are
+    not 'awaiting a decision'.
+
+    Both incomplete shapes are handled alike, on the evidence: the references are nullable with no CHECK; the Stage 5C
+    engine writes only the bank-anchored 'no candidate found' placeholder (bank present, ledger NULL) and never the inverse,
+    which the model nevertheless permits; Stage 5E refuses both with the same 'not a proposed match' message and its
+    exception derivation ignores both (it needs both references), so each leaves its row as a plain BANK_ONLY / LEDGER_ONLY
+    exception. A suggestion that references NO transaction (both NULL) is an orphan with nothing to classify and is ignored.
     NULL-safe: a suggestion whose decidability cannot be established as true is not decidable."""
     S = ReconciliationMatchSuggestion
-    return and_(S.status == MatchSuggestionStatus.PENDING, S.treasury_transaction_id.is_not(None),
+    references_a_transaction = or_(S.bank_statement_transaction_id.is_not(None), S.treasury_transaction_id.is_not(None))
+    return and_(S.status == MatchSuggestionStatus.PENDING, references_a_transaction,
                 ~func.coalesce(_actionable_pending_suggestion(), false()))
 
 
@@ -520,7 +528,7 @@ async def run_summary_report(db, scope, filters) -> dict[str, Any]:
         "Every figure in a run's row is attributed to THAT run: accepted = a claim created by the run's own decisions; proposed = the run's own actionable pending suggestions and PENDING groups. A transaction accepted or proposed in another run over the same account and an overlapping period is not inherited.",
         "Accepted = the transaction has an accepted claim from this run. Proposed = not accepted but covered by an ACTIONABLE pending proposal of this run. Unmatched = neither. The three always add up to the eligible count.",
         "Actionable = what the Stage 5E match-review queue can accept or reject: an unambiguous auto-tier suggestion or a PENDING group. Pending proposals counts only these; they are NOT counted as completed reconciliation. Rejected proposals are explicit rejections and never count as accepted.",
-        "Pending suggestions that are NOT actionable (review-tier, a competing-candidate tie, an incomplete candidate) remain exceptions under investigation. They are shown separately (Pending under investigation, and Investigating per side, which is part of Unmatched) and are never described as awaiting a decision.",
+        "Pending suggestions that are NOT actionable (review-tier, a competing-candidate tie, a 'no candidate found' placeholder or other incomplete suggestion) remain exceptions under investigation. They are shown separately (Pending under investigation, and Investigating per side, which is part of Unmatched) and are never described as awaiting a decision.",
         "Exceptions are open items, counted by their current status; they are a different thing from transactions and proposals and are not added to them.",
         "Runs shown are those whose reconciliation period overlaps the reporting period.",
     ])
@@ -623,7 +631,7 @@ async def matching_performance_report(db, scope, filters) -> dict[str, Any]:
         "Two different measures are shown and must not be added together. DECISION COUNTS count proposals (a suggestion or a group). UNIQUE TRANSACTION COUNTS count distinct bank/ledger rows, each once.",
         "The per-type figures are not mutually exclusive: one ledger row can be in a one-to-one match and also in an internal-transfer pairing, so only the 'any type' totals are de-duplicated and may be summed.",
         "Accepted = explicit accept decision (claims table). Pending = an ACTIONABLE proposal awaiting a decision, exactly what the Stage 5E match-review queue can accept or reject (an unambiguous auto-tier suggestion, or a PENDING group); not a completed reconciliation. Rejected = explicit rejection.",
-        "Pending suggestions that are NOT actionable (review tier, a competing-candidate tie, an incomplete candidate) are exceptions under investigation: they are not 'awaiting a decision', their transactions are unmatched, and they are shown separately as 'of which under investigation' (a subset of unmatched).",
+        "Pending suggestions that are NOT actionable (review tier, a competing-candidate tie, a 'no candidate found' placeholder or other incomplete suggestion) are exceptions under investigation: they are not 'awaiting a decision', their transactions are unmatched, and they are shown separately as 'of which under investigation' (a subset of unmatched).",
         "Decision counts cover runs whose reconciliation period overlaps the reporting period; unique transaction counts cover transactions dated inside the reporting period.",
         "Each eligible transaction is in exactly one bucket: accepted, proposed-only (actionable pending proposal, not accepted) or unmatched. Across runs a transaction is accepted if it has an accepted claim anywhere and proposed if an actionable pending proposal exists anywhere; per-run attribution is in the run summary.",
     ])
@@ -675,7 +683,7 @@ async def matching_performance_report(db, scope, filters) -> dict[str, Any]:
         kpi("accepted", "Accepted (unique transactions)", acc_total, "Eligible transactions with an accepted claim.", "reconciliation_accepted_claims"),
         kpi("proposed", "Proposed only (unique transactions)", bank["proposed"] + ledger["proposed"], "Not accepted, covered by an actionable pending proposal (awaiting an explicit decision).", "reconciliation_match_suggestions, reconciliation_match_groups"),
         kpi("unmatched", "Unmatched (unique transactions)", bank["unmatched"] + ledger["unmatched"], "Neither accepted nor covered by an actionable pending proposal.", "derived"),
-        kpi("investigating", "Of which under investigation", bank["investigating"] + ledger["investigating"], "Unmatched transactions that a non-actionable pending suggestion (review tier, tie, incomplete) points at; exceptions, not awaiting a decision.", "reconciliation_match_suggestions"),
+        kpi("investigating", "Of which under investigation", bank["investigating"] + ledger["investigating"], "Unmatched transactions that a non-actionable pending suggestion (review tier, tie, no-candidate placeholder or other incomplete suggestion) references; exceptions, not awaiting a decision.", "reconciliation_match_suggestions"),
         kpi("completion", "Completion rate (%)", pct(acc_total, eligible), "accepted unique transactions / eligible unique transactions x 100.", "derived"),
     ]
     result["tables"] = [

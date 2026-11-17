@@ -57,10 +57,21 @@ non-3-letter currency). Default reporting period: the last 30 days ending today 
   * *unmatched*: neither.
 
   `accepted + proposed + unmatched = eligible`, per side, always (asserted by tests).
-* **Pending suggestions that are not actionable** (review tier, a competing-candidate tie, or an incomplete candidate)
-  remain exceptions to investigate under Stage 5E. They are never described as awaiting a decision: their transactions
-  are *unmatched*, and are reported separately as *under investigation* (a subset of unmatched, not a fourth bucket).
-  The pending-proposal counts and the proposed-only buckets use this same definition, so they always agree.
+* **Pending suggestions that are not actionable** (review tier, a competing-candidate tie, a "no candidate found"
+  placeholder, or any other incomplete suggestion) remain exceptions to investigate under Stage 5E. They are never
+  described as awaiting a decision: their transactions are *unmatched*, and are reported separately as *under
+  investigation* (a subset of unmatched, not a fourth bucket). The pending-proposal counts and the proposed-only
+  buckets use this same definition, so they always agree.
+* **Incomplete suggestions: both directions are treated alike, on the evidence.** A suggestion's bank and ledger
+  references are both nullable, with no database CHECK. The Stage 5C engine has two creation sites and both always set
+  the bank reference; its "no candidate found" placeholder is *bank present, ledger NULL* (written for every bank row
+  with no candidate, `PENDING`, no confidence). The inverse shape, *ledger present, bank NULL*, is representable but is
+  never written by the engine. Stage 5E treats both identically: `suggestion_not_decidable_reason` refuses both with
+  the same "not a proposed match" message, and the exception derivation ignores both (it requires both references), so
+  each leaves its transaction as a plain `BANK_ONLY` / `LEDGER_ONLY` exception. Reporting follows suit: a pending,
+  non-decidable suggestion that references a bank row marks that row *under investigation*, and one that references a
+  ledger row marks that row. A suggestion that references **no** transaction (both NULL) is an orphan with nothing to
+  classify and is not counted anywhere. The test suite drives the real engine to confirm which shapes it writes.
 * **Rejected** proposals stay rejected: they never count as accepted, and their transactions are unmatched.
 * **Run-specific attribution (run summary).** A run's figures come from that run's own records: accepted = a claim
   created by one of the run's own decisions (linked through the decision's `reconciliation_run_id`); proposed = the
@@ -185,13 +196,15 @@ what the user may see.
 
 Run with the documented disposable test database (`docs/TEST_DATABASE_SAFETY.md`) on PostgreSQL 16.15:
 
-* 92 tests in `tests/test_reconciliation_reports_{calculations,authorization,exports,audit_and_integrity}.py`
+* 97 tests in `tests/test_reconciliation_reports_{calculations,authorization,exports,audit_and_integrity}.py`
   (calculations 29, authorization 16, exports 35, audit and integrity 5) and
   `tests/test_reconciliation_reports_integrity_corrections.py` (7: run-specific attribution, pending-proposal semantics
-  checked against the real Stage 5E match-review endpoints). Expected figures were derived by hand from a
+  checked against the real Stage 5E match-review endpoints) and
+  `tests/test_reconciliation_reports_incomplete_suggestions.py` (5: every reference shape, run scoping, a real-engine
+  run, and agreement with the match-review queue). Expected figures were derived by hand from a
   scenario built through the real Stage 5E API (accepted one-to-one, one-to-many and internal-transfer matches, a
   pending and a rejected proposal, a transaction in two accepted proposals, two currencies, a reversed row, an
   out-of-period row).
-* The full suite (572 tests) passes. The existing Stage 5A–5E tests are unchanged.
+* The full suite (577 tests) passes. The existing Stage 5A–5E tests are unchanged.
 * Mutation checks: disabling the formula-injection defence, the EXPORT permission check, the account scope, the
   open-item scope, or counting a pending proposal as accepted each caused tests to fail.
