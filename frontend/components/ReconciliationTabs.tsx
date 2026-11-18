@@ -8,7 +8,7 @@ import { useAuthToken } from "@/lib/use-auth-token";
 // The two reconciliation queues are deliberately separate: EXCEPTIONS are unresolved items needing
 // investigation; MATCH REVIEW holds engine PROPOSALS that are still awaiting an accept/reject decision.
 // A proposal is not a reconciliation until it is accepted, so its count is shown prominently.
-export default function ReconciliationTabs({ active, refreshKey }: { active: "exceptions" | "review"; refreshKey?: number }) {
+export default function ReconciliationTabs({ active, refreshKey }: { active: "exceptions" | "review" | "adaptive"; refreshKey?: number }) {
   const token = useAuthToken();
   const [summary, setSummary] = useState<MatchReviewSummary | null>(null);
 
@@ -34,6 +34,7 @@ export default function ReconciliationTabs({ active, refreshKey }: { active: "ex
       <Link href="/reconciliation/match-review" style={tab(active === "review")}>
         Match review – decisions pending{count(summary?.pending_decisions, "#0369a1")}
       </Link>
+      <Link href="/reconciliation/adaptive" style={tab(active === "adaptive")}>Adaptive matching</Link>
     </div>
   );
 }

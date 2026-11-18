@@ -285,9 +285,10 @@ export const api = {
       `/reconciliation/open-items/${id}/${action}`, { method: "POST", body: JSON.stringify(body) }, token),
   getMatchReviewSummary: (token: string) =>
     request<MatchReviewSummary>(`/reconciliation/match-proposals/summary`, {}, token),
-  listMatchProposals: (token: string, statuses: string[]) => {
+  listMatchProposals: (token: string, statuses: string[], orderBy?: "recommendation") => {
     const query = new URLSearchParams();
     statuses.forEach((st) => query.append("status", st));
+    if (orderBy) query.set("order_by", orderBy);
     return request<MatchProposalRow[]>(`/reconciliation/match-proposals?${query.toString()}`, {}, token);
   },
   getMatchProposal: (token: string, kind: string, id: string) =>
@@ -296,6 +297,18 @@ export const api = {
     request<{ status: string; already_decided: boolean }>(
       `/reconciliation/match-proposals/${kind}/${id}/${action}`,
       { method: "POST", body: JSON.stringify({ reason: reason ?? null }) }, token),
+  getAdaptiveSettings: (token: string, entityId: string, accountId?: string) =>
+    request<AdaptiveSettingsResponse>(
+      `/reconciliation/adaptive/settings?${new URLSearchParams({ legal_entity_id: entityId, ...(accountId ? { bank_account_id: accountId } : {}) })}`, {}, token),
+  updateAdaptiveSettings: (token: string, body: { legal_entity_id: string; bank_account_id?: string | null; settings: Record<string, unknown>; reason?: string }) =>
+    request<AdaptiveSettingsResponse>("/reconciliation/adaptive/settings", { method: "PUT", body: JSON.stringify(body) }, token),
+  getAdaptiveHealth: (token: string, entityId: string, accountId: string) =>
+    request<AdaptiveHealth>(`/reconciliation/adaptive/health?${new URLSearchParams({ legal_entity_id: entityId, bank_account_id: accountId })}`, {}, token),
+  getAdaptiveExplanations: (token: string, suggestionIds: string[]) => {
+    const query = new URLSearchParams();
+    suggestionIds.forEach((id) => query.append("suggestion_id", id));
+    return request<AdaptiveExplanations>(`/reconciliation/adaptive/explanations?${query.toString()}`, {}, token);
+  },
   listReconciliationReports: (token: string) => request<ReportCatalogEntry[]>("/reconciliation/reports", {}, token),
   getReconciliationReport: (token: string, name: string, query: string) =>
     request<ReportResult>(`/reconciliation/reports/${name}${query ? `?${query}` : ""}`, {}, token),
@@ -808,6 +821,7 @@ export interface AssignableUser {
 }
 
 export interface MatchProposalRow {
+  recommendation_score?: string | null; // Stage 5G: present only when the queue is ordered by adaptive recommendation
   kind: "SUGGESTION" | "GROUP";
   id: string;
   reconciliation_run_id: string;
@@ -875,6 +889,44 @@ export interface ReportResult {
   filters: Record<string, unknown>; kpis: ReportKpi[]; tables: ReportTable[]; notes: string[]; definitions: string[];
 }
 export interface ReportCatalogEntry { key: string; title: string; description: string; exportable: boolean }
+
+// --- Stage 5G adaptive matching (suggestions only; a person must accept or reject every match) ---
+export interface AdaptivePattern {
+  family: string; family_label: string; label: string; accepted: number; rejected: number;
+  balance: string; contribution: string; supported: boolean; note: string | null;
+}
+export interface AdaptiveExplanation {
+  suggestion_id: string; reconciliation_run_id: string; deterministic_score: string; adaptive_contribution: string;
+  recommendation_score: string; score_band: "AUTO" | "REVIEW"; support_level: "NONE" | "LOW" | "MEDIUM" | "HIGH";
+  fallback: boolean; fallback_reason: string | null; accepted_examples: number; rejected_examples: number;
+  learning_rule_version: string; base_rule_version: string; configuration_version: number | null; evidence_cutoff: string;
+  scope: { level: string; bank_account_id: string; currency_code: string; direction: string; match_type: string };
+  patterns: AdaptivePattern[]; explanation: string; human_review_required: boolean; does_not_change: string;
+}
+export interface AdaptiveExplanations {
+  explanations: Record<string, AdaptiveExplanation>; without_explanation: string[]; note: string; scope_note: string;
+}
+export interface AdaptiveSettingsValues {
+  enabled: boolean; scope: string; min_evidence: number; min_distinct_runs: number; min_signal_families: number;
+  max_boost: string; max_penalty: string; half_life_days: number; max_evidence_age_days: number; min_support_level: string;
+}
+export interface AdaptiveSettingsResponse {
+  legal_entity_id: string; bank_account_id: string | null; currency_code: string | null; configuration_id: string | null;
+  configuration_version: number | null; settings: AdaptiveSettingsValues; warnings: string[]; settings_unusable: boolean;
+  defaults: AdaptiveSettingsValues; bounds: Record<string, [string, string]>; learning_rule_version: string; base_rule_version: string;
+  disabled_by_default: boolean; automatic_acceptance: boolean; scope_note: string; human_review_required: string;
+}
+export interface AdaptiveHealth {
+  legal_entity_id: string; bank_account_id: string; evaluated_at: string; enabled: boolean; settings_unusable: boolean; warnings: string[];
+  configuration_version: number | null; learning_rule_version: string;
+  evidence: {
+    decisions_scanned: number; scan_truncated: boolean; eligible: number; eligible_accepted: number; eligible_rejected: number;
+    excluded_by_reason: Record<string, number>; latest_eligible_decision_at: string | null;
+  };
+  patterns_by_family: Record<string, { patterns: number; supported: number }>;
+  scored_suggestions: { total: number; with_adaptive_contribution: number; fell_back_to_deterministic: number; last_annotated_at: string | null };
+  scope_note: string;
+}
 
 export interface ReconciliationConfigurationOut {
   id: string;

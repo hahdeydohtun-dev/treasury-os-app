@@ -6,7 +6,7 @@ database or any other database:
   * a template database is migrated to the PREVIOUS head (f4c533db287d) and seeded once per module;
   * each test clones it (CREATE DATABASE ... TEMPLATE), writes "historical" reconciliation decisions straight into
     the clone with SQL - exactly what the pre-claims code could have produced, since it never checked overlaps -
-    and runs `alembic upgrade head` in a SUBPROCESS whose environment points at the clone;
+    and runs `alembic upgrade <the Stage 5E revision under test>` in a SUBPROCESS whose environment points at the clone;
   * every scratch database is dropped afterwards (only prefixed, marked or self-created databases can be dropped),
     and leftovers from a crashed earlier run are swept first, so the tests are safe to rerun.
 
@@ -213,7 +213,7 @@ def test_conflicting_history_aborts_the_migration_before_any_schema_change(clone
     before_state, before_artifacts = _history_state(clone), _migration_artifacts(clone)
     assert before_artifacts == {"revision": PREVIOUS_HEAD, "claims_table": 0, "claim_indexes": 0, "claim_enum": 0}
 
-    result = clone.run("upgrade", "head")
+    result = clone.run("upgrade", NEW_HEAD)
 
     assert result.returncode != 0
     assert "Cannot add accepted-claim uniqueness" in result.stderr and "already claim the same transaction" in result.stderr
@@ -222,7 +222,7 @@ def test_conflicting_history_aborts_the_migration_before_any_schema_change(clone
     assert after["revision"] == PREVIOUS_HEAD and after["claims_table"] == 0 and after["claim_indexes"] == 0
     assert _history_state(clone) == before_state                        # decisions and statuses untouched
 
-    again = clone.run("upgrade", "head")                                # rerunning the refused upgrade is safe and consistent
+    again = clone.run("upgrade", NEW_HEAD)                                # rerunning the refused upgrade is safe and consistent
     assert again.returncode != 0 and _migration_artifacts(clone) == before_artifacts
 
 
@@ -231,10 +231,10 @@ def test_after_the_operator_resolves_the_conflict_the_same_database_migrates(clo
     h.suggestion(h.run(), 0)
     second_run = h.run()
     second = h.suggestion(second_run, 0)
-    assert clone.run("upgrade", "head").returncode != 0
+    assert clone.run("upgrade", NEW_HEAD).returncode != 0
     clone.rows("delete from reconciliation_match_decisions where suggestion_id = %s", (second,))   # the operator's remedy
     clone.rows("update reconciliation_match_suggestions set status = 'REJECTED' where id = %s", (second,))
-    result = clone.run("upgrade", "head")
+    result = clone.run("upgrade", NEW_HEAD)
     assert result.returncode == 0, result.stderr[-1500:]
     assert _migration_artifacts(clone)["revision"] == NEW_HEAD
     assert clone.scalar("select count(*) from reconciliation_accepted_claims") == 1
@@ -254,7 +254,7 @@ def test_valid_history_migrates_and_backfills_the_expected_claims_without_duplic
     h.suggestion(run_2, 4, status="PENDING", decide=False)   # pending, undecided: must NOT claim
     before_state = _history_state(clone)
 
-    result = clone.run("upgrade", "head")
+    result = clone.run("upgrade", NEW_HEAD)
 
     assert result.returncode == 0, result.stderr[-1500:]
     assert _migration_artifacts(clone) == {"revision": NEW_HEAD, "claims_table": 1, "claim_indexes": 2, "claim_enum": 1}
@@ -274,7 +274,7 @@ def test_valid_history_migrates_and_backfills_the_expected_claims_without_duplic
 def test_the_required_partial_unique_indexes_exist_and_are_enforced_after_migration(clone):
     h = History(clone)
     h.suggestion(h.run(), 0)
-    assert clone.run("upgrade", "head").returncode == 0
+    assert clone.run("upgrade", NEW_HEAD).returncode == 0
     definitions = dict(clone.rows("select indexname, indexdef from pg_indexes where indexname in ('ux_accepted_claim_bank','ux_accepted_claim_ledger')"))
     assert set(definitions) == {"ux_accepted_claim_bank", "ux_accepted_claim_ledger"}
     for name, column in (("ux_accepted_claim_bank", "bank_statement_transaction_id"), ("ux_accepted_claim_ledger", "treasury_transaction_id")):
@@ -292,11 +292,11 @@ def test_the_required_partial_unique_indexes_exist_and_are_enforced_after_migrat
 
 
 def test_empty_history_migrates_cleanly(clone):
-    result = clone.run("upgrade", "head")
+    result = clone.run("upgrade", NEW_HEAD)
     assert result.returncode == 0, result.stderr[-1500:]
     assert _migration_artifacts(clone)["revision"] == NEW_HEAD
     assert clone.scalar("select count(*) from reconciliation_accepted_claims") == 0
-    assert clone.run("upgrade", "head").returncode == 0          # idempotent
+    assert clone.run("upgrade", NEW_HEAD).returncode == 0          # idempotent
     assert clone.run("heads").returncode == 0
 
 

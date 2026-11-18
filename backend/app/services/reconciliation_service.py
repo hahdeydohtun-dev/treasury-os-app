@@ -25,6 +25,7 @@ from app.models.reconciliation import (
     ReconciliationRun,
     ReconciliationRunStatus,
 )
+from app.services.reconciliation_adaptive_service import annotate_run_adaptively
 from app.services.reconciliation_advanced_matching import run_advanced_matching_for_run
 from app.services.reconciliation_matching_engine import run_matching_for_run
 from app.services.reconciliation_open_item_service import sync_open_items_for_run
@@ -313,6 +314,10 @@ async def execute_reconciliation_run(db: AsyncSession, run: ReconciliationRun, u
         )
         run.advanced_match_count = advanced_result.advanced_match_count
         run.ambiguous_advanced_count = advanced_result.ambiguous_advanced_count
+
+        # Stage 5G integration point: annotate the suggestions Stage 5C/5D just persisted with their adaptive explanation.
+        # Annotation only (disabled by default; never raises; never changes a suggestion, its confidence or decidability).
+        await annotate_run_adaptively(db, run, configuration, user_id)
 
         # Stage 5E integration point: derive the actionable open items from this run's results
         # inside the SAME transaction (and a savepoint, so a failure leaves no partial items).

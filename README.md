@@ -21,7 +21,7 @@ Multi-entity, multi-currency Treasury Management System.
 | Stage 5E — Match-disposition integrity & duplicate-acceptance protection | Complete |
 | Stage 5E verification — fail-closed test-database guard, eligibility tests, migration pre-flight tests | Complete |
 | Stage 5F — Reconciliation Reports (run, matching, exception, ageing, assignment, account and entity/group reports; Excel and PDF exports) | Complete |
-| Stage 5G — Adaptive Matching | **Not Started** |
+| Stage 5G — Adaptive Matching (v1: one-to-one suggestions, account-level learning, off by default, human approval required) | Complete |
 | Stage 5H — Full Reconciliation Frontend | **Not Started** |
 | Stage 5I — Final Hardening | **Not Started** |
 
@@ -82,6 +82,10 @@ report (e.g. `docs/STAGE_4_INVESTMENTS.md`,
   separately, pending proposals are never counted as reconciled, and money is shown per currency and never converted or added
   across currencies. Exports are rendered from the same data as the screen and are limited to the user's authorized entities.
   See `docs/STAGE_5F_RECONCILIATION_REPORTS.md`.
+- **Adaptive matching**: Stage 5G is **off by default** and only annotates. For Stage 5C one-to-one suggestions it learns, per bank
+  account, from explicitly accepted and rejected decisions and records an immutable explanation (deterministic score, capped adaptive
+  contribution, tier-locked recommendation, evidence, versions). It never changes a suggestion's confidence, status or decidability, and a
+  person must still accept or reject every match. See `docs/STAGE_5G_ADAPTIVE_MATCHING.md`.
 - **Financial calculations**: `Decimal` throughout, never floating point.
 
 ## Investment lifecycle (Stage 4)
@@ -121,7 +125,7 @@ cross-group regression tests throughout the test suite.
 | Architecture, data model (foundation, Stage 1-2) | `ARCHITECTURE.md`, `DOMAIN_MODEL.md`, `TREASURY_DATA_MODEL.md`, `EXCEL_DATA_HUB.md` |
 | Forecast | `FORECAST_ENGINE.md`, `FORECAST_METHODOLOGY.md`, `FORECAST_DATA_SOURCES.md` |
 | Funding & facilities, investments (Stage 3-4) | `docs/STAGE_3_FUNDING_CREDIT_FACILITIES.md`, `docs/STAGE_4_INVESTMENTS.md` |
-| Bank reconciliation (Stage 5A-5F) | `docs/STAGE_5A_*` to `docs/STAGE_5F_*`; schema overview in `docs/RECONCILIATION_SCHEMA.md` |
+| Bank reconciliation (Stage 5A-5G) | `docs/STAGE_5A_*` to `docs/STAGE_5G_*`; schema overview in `docs/RECONCILIATION_SCHEMA.md` |
 | Running the tests safely | `docs/TEST_DATABASE_SAFETY.md` |
 | Build order and what is deferred | `DEVELOPMENT_ROADMAP.md` |
 
@@ -198,9 +202,9 @@ export TREASURY_TEST_CONFIRM_DESTRUCTIVE=treasury_os_test
 python -m pytest -q          # `python -m` is required; bare `pytest` cannot import the app
 ```
 
-577 tests are collected as of Stage 5F (run `python -m pytest --collect-only -q` for the current count; this figure is a
+705 tests are collected as of Stage 5G (run `python -m pytest --collect-only -q` for the current count; this figure is a
 point-in-time snapshot). They cover the foundation, Excel Data Hub, forecast engine, RBAC/entity-isolation hardening,
-facilities, funding actions and investments, the bank-reconciliation stages 5A-5F (ingestion, data model, deterministic and
+facilities, funding actions and investments, the bank-reconciliation stages 5A-5G (ingestion, data model, deterministic and
 advanced/FX matching, open items, explicit match decisions, duplicate-acceptance protection, reports and exports), the
 test-database safety guard and the accepted-claims migration pre-flight.
 
@@ -295,11 +299,11 @@ tagged `source_type="DEMO_DATA"` — never presented as real financial data.
 
 ## What's NOT implemented yet
 
-Out of scope so far (see `DEVELOPMENT_ROADMAP.md` for the planned build order): Stage 5G adaptive / AI matching, Stage 5H the full reconciliation frontend, Stage 5I final reconciliation
+Out of scope so far (see `DEVELOPMENT_ROADMAP.md` for the planned build order): adaptive learning for grouped (Stage 5D) proposals, bank-wide learning and candidate re-selection (deferred from Stage 5G v1), Stage 5H the full reconciliation frontend, Stage 5I final reconciliation
 hardening, intercompany reconciliation, working capital, KPIs/reports beyond what each stage's own doc lists,
 tasks/workflow, and the AI Treasury Copilot.
 
-Bank reconciliation Stages 5A-5F are complete: statement ingestion, the data model, deterministic one-to-one
+Bank reconciliation Stages 5A-5G are complete: statement ingestion, the data model, deterministic one-to-one
 matching, advanced grouped and FX matching, and the human workflow on top of them - an open-item work queue
 (`/reconciliation/open-items`), a match-review queue where proposals are explicitly accepted or rejected
 (`/reconciliation/match-review`), and database-enforced protection against accepting a transaction twice. Still
@@ -308,6 +312,7 @@ revoking a decision, and choosing one candidate out of a tie. See `docs/STAGE_5E
 reconciliation reports and Excel/PDF exports at `/reconciliation/reports` (see `docs/STAGE_5F_RECONCILIATION_REPORTS.md`); it has
 no charts, scheduled reports or currency consolidation.
 
+Stage 5G adds optional adaptive matching (`/reconciliation/adaptive`; one-to-one suggestions and account-level learning only, off by default).
 Each completed stage's own
 `docs/STAGE_N_*.md`
 lists that stage's specific known limitations in detail (e.g. investment

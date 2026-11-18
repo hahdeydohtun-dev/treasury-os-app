@@ -1,4 +1,4 @@
-# Reconciliation schema overview (Stages 5A–5E)
+# Reconciliation schema overview (Stages 5A–5G)
 
 One page that maps every table the bank-reconciliation stages added, how they relate, and which database
 constraints carry the integrity guarantees. It is a map, not a replacement for the stage documents, which hold the
@@ -12,10 +12,11 @@ detail and the rationale:
 | 5D advanced / FX matching | `STAGE_5D_ADVANCED_MATCHING.md` |
 | 5E open items, decisions, duplicate-acceptance protection | `STAGE_5E_OPEN_ITEM_WORKFLOW.md` |
 | 5F reports and exports (read-only, no tables of its own) | `STAGE_5F_RECONCILIATION_REPORTS.md` |
+| 5G adaptive matching (one new table) | `STAGE_5G_ADAPTIVE_MATCHING.md` |
 | Test database safety | `TEST_DATABASE_SAFETY.md` |
 
 Facts below were taken from the models and migrations at the Stage 5E verification state (Alembic head
-`d5e508d02a28`, 25 migrations in one linear chain). If a table or constraint changes, update this page in the same
+`a7c1e9b4d2f6`, 26 migrations in one linear chain). If a table or constraint changes, update this page in the same
 change.
 
 ## Tables
@@ -32,6 +33,7 @@ change.
 | `reconciliation_open_item_events` | 5E | **Append-only history** of each open item (comments, assignments, evidence references, every status change). No endpoint updates or deletes it. | – |
 | `reconciliation_match_decisions` | 5E | The **explicit accept / reject decision** on a proposal, with actor, time, reason and previous/new status. | `ck_reconciliation_match_decision_exactly_one_subject`, `uq_reconciliation_match_decision_suggestion`, `uq_reconciliation_match_decision_group` (one decision per proposal) |
 | `reconciliation_accepted_claims` | 5E | One row per transaction per **accepted** proposal; the guarantee that a transaction is never accepted through two proposals, across runs and under concurrent requests. | `ck_reconciliation_accepted_claim_exactly_one_transaction`; partial unique `ux_accepted_claim_bank`, `ux_accepted_claim_ledger` on `(transaction, claim_kind)` |
+| `reconciliation_adaptive_scores` | 5G | The immutable **adaptive explanation** of one Stage 5C one-to-one suggestion: deterministic score, capped adaptive contribution, tier-locked recommendation, fallback status, rule and configuration versions, evidence cutoff and pattern evidence. Append-only and scope-checked by database triggers; the suggestion itself is never changed. | `uq_reconciliation_adaptive_score_suggestion`, `ck_adaptive_score_*`, triggers `trg_reconciliation_adaptive_scores_immutable` and `..._scope_check` |
 
 ## Status vocabularies
 

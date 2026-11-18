@@ -436,9 +436,21 @@ upload, bulk assignment, exports, revoking a decision, choosing one candidate ou
   record per generation and export. No migration; one new dependency (`reportlab`).
 - Detail: `docs/STAGE_5F_RECONCILIATION_REPORTS.md`. Deferred: charts, scheduled reports, currency consolidation.
 
-### Stage 5G onward (not started)
+### Stage 5G — Adaptive Matching (delivered, v1)
 
-- Adaptive matching; full reconciliation frontend; final reconciliation hardening
+- Learns, per bank account, from explicitly accepted and rejected Stage 5C one-to-one decisions and records an immutable explanation per
+  suggestion (deterministic score, capped adaptive contribution, tier-locked recommendation, evidence, versions, fallback status).
+- Off by default; settings live in the versioned reconciliation configuration (new version per change, audited, `CONFIGURE`).
+- Annotation only: never changes a suggestion, its confidence, tier or decidability; a person accepts or rejects every match; Stage 5C/5D/5E
+  behaviour, accepted-claim protection and the Stage 5F reports are unchanged.
+- One new table (`reconciliation_adaptive_scores`, append-only and scope-checked by database triggers), one new migration, a review-queue
+  explanation panel, an opt-in queue ordering and the `/reconciliation/adaptive` administration page.
+- Detail: `docs/STAGE_5G_ADAPTIVE_MATCHING.md`. Deferred: learning from and scoring grouped (Stage 5D) proposals including batch patterns,
+  bank-wide learning, and candidate re-selection.
+
+### Stage 5H onward (not started)
+
+- Full reconciliation frontend; final reconciliation hardening; adaptive learning for grouped proposals
 
 ## Stage 6 — Intercompany Reconciliation
 

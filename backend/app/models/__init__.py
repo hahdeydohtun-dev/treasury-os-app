@@ -77,6 +77,7 @@ from app.models.bank_statement import (  # noqa: F401
     BankStatementTransaction,
     BankStatementTransactionStatus,
 )
+from app.models.reconciliation_adaptive import ReconciliationAdaptiveScore  # noqa: F401
 from app.models.reconciliation import (  # noqa: F401
     AcceptedClaimKind,
     RECONCILIATION_RUN_STATUS_TRANSITIONS,

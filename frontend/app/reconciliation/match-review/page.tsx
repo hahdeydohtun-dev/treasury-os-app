@@ -2,8 +2,9 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
-import { api, ApiError, MatchProposalDetail, MatchProposalRow } from "@/lib/api-client";
+import { AdaptiveExplanation as Explanation, api, ApiError, MatchProposalDetail, MatchProposalRow } from "@/lib/api-client";
 import { useAuthToken } from "@/lib/use-auth-token";
+import AdaptiveExplanation from "@/components/AdaptiveExplanation";
 import ReconciliationTabs from "@/components/ReconciliationTabs";
 
 // PENDING = proposed by the engine, awaiting a decision (NOT reconciled). ACCEPTED = explicitly accepted.
@@ -38,15 +39,24 @@ export default function MatchReviewPage() {
   const [actionError, setActionError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
+  const [ranking, setRanking] = useState<"default" | "recommendation">("default");
+  const [explanation, setExplanation] = useState<Explanation | null>(null);
 
   const load = useCallback(() => {
     if (!token) return;
     setError(null);
-    api.listMatchProposals(token, VIEWS[viewIndex].statuses)
+    api.listMatchProposals(token, VIEWS[viewIndex].statuses, ranking === "recommendation" ? "recommendation" : undefined)
       .then(setRows)
       .catch((err) => setError(err instanceof ApiError ? err.message : "Unable to reach the API"));
-  }, [token, viewIndex]);
+  }, [token, viewIndex, ranking]);
   useEffect(load, [load]);
+
+  // Stage 5G: the adaptive explanation (if one was recorded) for the selected one-to-one suggestion. Read-only.
+  useEffect(() => {
+    setExplanation(null);
+    if (!token || !selected || selected.kind !== "SUGGESTION") return;
+    api.getAdaptiveExplanations(token, [selected.id]).then((r) => setExplanation(r.explanations[selected.id] ?? null)).catch(() => setExplanation(null));
+  }, [token, selected]);
 
   const loadDetail = useCallback((kind: string, id: string) => {
     if (!token) return;
@@ -99,6 +109,15 @@ export default function MatchReviewPage() {
             {VIEWS.map((v, i) => <option key={v.label} value={i}>{v.label}</option>)}
           </select>
         </label>
+        <label>Order by<br />
+          <select value={ranking} onChange={(e) => setRanking(e.target.value as "default" | "recommendation")}>
+            <option value="default">Oldest first (default)</option>
+            <option value="recommendation">Adaptive recommendation (highest first)</option>
+          </select>
+        </label>
+        <span style={{ color: "var(--color-text-muted)", fontSize: 12, maxWidth: 360 }}>
+          Ordering only prioritises the queue. Adaptive scores are suggestions and never accept, reject or change a proposal.
+        </span>
       </div>
       {error && <p style={{ color: "var(--color-danger)" }}>{error}</p>}
 
@@ -110,6 +129,7 @@ export default function MatchReviewPage() {
               <tr style={{ textAlign: "left", color: "var(--color-text-muted)" }}>
                 <th style={{ padding: "6px 8px" }}>Proposal</th><th style={{ padding: "6px 8px" }}>Status</th>
                 <th style={{ padding: "6px 8px" }}>Amount</th><th style={{ padding: "6px 8px" }}>Confidence</th>
+                {ranking === "recommendation" && <th style={{ padding: "6px 8px" }}>Recommendation</th>}
                 <th style={{ padding: "6px 8px" }}>Reference</th>
               </tr>
             </thead>
@@ -121,11 +141,12 @@ export default function MatchReviewPage() {
                   <td style={{ padding: "6px 8px" }}><StatusBadge status={r.status} /></td>
                   <td style={{ padding: "6px 8px" }}>{money(r.amount, r.currency_code)}</td>
                   <td style={{ padding: "6px 8px" }}>{r.confidence ? Number(r.confidence).toFixed(0) : "–"}</td>
+                  {ranking === "recommendation" && <td style={{ padding: "6px 8px" }}>{r.recommendation_score ?? "–"}</td>}
                   <td style={{ padding: "6px 8px" }}>{r.bank_reference ?? r.ledger_reference ?? "–"}</td>
                 </tr>
               ))}
               {rows.length === 0 && (
-                <tr><td colSpan={5} style={{ padding: "12px 8px", color: "var(--color-text-muted)" }}>
+                <tr><td colSpan={ranking === "recommendation" ? 6 : 5} style={{ padding: "12px 8px", color: "var(--color-text-muted)" }}>
                   {viewIndex === 0 ? "No proposals are waiting for a decision." : "Nothing here."}
                 </td></tr>
               )}
@@ -138,6 +159,7 @@ export default function MatchReviewPage() {
             <h2>{detail.label.replace(/_/g, " ").toLowerCase()} <StatusBadge status={detail.status} /></h2>
             <p style={{ color: "var(--color-text-muted)" }}>{detail.reason}</p>
             {detail.matching_rule_version && <p>Rule version {detail.matching_rule_version} · confidence {detail.confidence ?? "–"}</p>}
+            {detail.kind === "SUGGESTION" && <AdaptiveExplanation explanation={explanation} />}
 
             <h3>Bank statement transactions</h3>
             {detail.bank_transactions.length === 0 && <p>–</p>}

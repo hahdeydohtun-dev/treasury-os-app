@@ -8,6 +8,7 @@ approvals); viewing needs `VIEW`. A proposal the caller cannot view is reported 
 Deciding never touches a ledger, bank-statement or cash record.
 """
 import uuid
+from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
@@ -39,6 +40,7 @@ from app.models.reconciliation import (
     ReconciliationOpenItem,
     ReconciliationRun,
 )
+from app.models.reconciliation_adaptive import ReconciliationAdaptiveScore
 from app.models.treasury_transaction import TreasuryTransaction
 from app.services import reconciliation_match_decision_service as decisions
 from app.services.reconciliation_scoring import AUTO_MATCH_THRESHOLD
@@ -156,6 +158,10 @@ async def list_match_proposals(
     relationship_type: MatchRelationshipType | None = None,
     run_id: uuid.UUID | None = None,
     legal_entity_id: uuid.UUID | None = None,
+    order_by: str | None = Query(
+        None, pattern="^recommendation$",
+        description="Optional. 'recommendation' orders by the Stage 5G adaptive recommendation score; omitted = the unchanged default order.",
+    ),
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
@@ -206,7 +212,22 @@ async def list_match_proposals(
     )
     for r in rows:
         r["decision"] = _decision_dict(found.get((r["kind"], uuid.UUID(r["id"]))))
-    rows.sort(key=lambda r: (r["created_at"], r["id"]))
+    if order_by == "recommendation":
+        # Stage 5G (opt-in): prioritisation only. Reads the stored explanation; never changes a proposal, its status or whether
+        # it can be decided. A suggestion without an explanation (and every group) is ranked by its own deterministic confidence.
+        suggestion_ids = [uuid.UUID(r["id"]) for r in rows if r["kind"] == "SUGGESTION"]
+        scores: dict[uuid.UUID, Decimal] = {}
+        if suggestion_ids:
+            scores = {sid: score for sid, score in (await db.execute(
+                select(ReconciliationAdaptiveScore.suggestion_id, ReconciliationAdaptiveScore.recommendation_score)
+                .where(ReconciliationAdaptiveScore.suggestion_id.in_(suggestion_ids)))).all()}
+        for r in rows:
+            if r["kind"] == "SUGGESTION":
+                score = scores.get(uuid.UUID(r["id"]))
+                r["recommendation_score"] = str(score) if score is not None else None
+        rows.sort(key=lambda r: (-Decimal(r.get("recommendation_score") or r["confidence"] or "0"), r["created_at"], r["id"]))
+    else:
+        rows.sort(key=lambda r: (r["created_at"], r["id"]))
     return rows[offset:offset + limit]
 
 
