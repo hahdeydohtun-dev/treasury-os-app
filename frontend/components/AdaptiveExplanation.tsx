@@ -48,7 +48,7 @@ export default function AdaptiveExplanation({ explanation }: { explanation: Expl
       </div>
       <p>{explanation.explanation}</p>
       <p style={{ color: "var(--color-text-muted)", fontSize: 13 }}>
-        Evidence used: {explanation.accepted_examples} accepted and {explanation.rejected_examples} rejected earlier decisions · rule version{" "}
+        Evidence used: {explanation.accepted_examples} accepted and {explanation.rejected_examples} rejected distinct transaction pairs (repeated decisions on one pair count once) · rule version{" "}
         {explanation.learning_rule_version} · configuration v{explanation.configuration_version ?? "–"} · evidence up to{" "}
         {new Date(explanation.evidence_cutoff).toLocaleString()} · scope: this bank account only ({explanation.scope.currency_code},{" "}
         {explanation.scope.direction.toLowerCase()}, {explanation.scope.match_type.toLowerCase()} matches)

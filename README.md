@@ -202,7 +202,7 @@ export TREASURY_TEST_CONFIRM_DESTRUCTIVE=treasury_os_test
 python -m pytest -q          # `python -m` is required; bare `pytest` cannot import the app
 ```
 
-705 tests are collected as of Stage 5G (run `python -m pytest --collect-only -q` for the current count; this figure is a
+716 tests are collected as of Stage 5G (run `python -m pytest --collect-only -q` for the current count; this figure is a
 point-in-time snapshot). They cover the foundation, Excel Data Hub, forecast engine, RBAC/entity-isolation hardening,
 facilities, funding actions and investments, the bank-reconciliation stages 5A-5G (ingestion, data model, deterministic and
 advanced/FX matching, open items, explicit match decisions, duplicate-acceptance protection, reports and exports), the

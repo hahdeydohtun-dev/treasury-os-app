@@ -53,10 +53,30 @@ ledger row still `POSTED`; an accepted decision still has its claim; and it was 
 **Excluded, and counted by reason** (shown in the learning-health view, never silently dropped):
 `GROUP_PROPOSAL_NOT_LEARNED_IN_V1`, `SUGGESTION_MISSING`, `INVALID_DECISION_RECORD`, `STATUS_MISMATCH`, `INCOMPLETE_SUGGESTION`,
 `RUN_MISMATCH`, `RUN_NOT_COMPLETED`, `TRANSACTION_MISSING`, `SCOPE_MISMATCH`, `CURRENCY_MISMATCH`, `BANK_TRANSACTION_REVERSED`,
-`LEDGER_TRANSACTION_NOT_POSTED`, `ACCEPTED_WITHOUT_CLAIM`, `OUTSIDE_EVIDENCE_WINDOW`.
+`LEDGER_TRANSACTION_NOT_POSTED`, `ACCEPTED_WITHOUT_CLAIM`, `OUTSIDE_EVIDENCE_WINDOW`, `SUPERSEDED_BY_LATER_DECISION_ON_SAME_PAIR`.
 
 **PENDING never counts.** A pending proposal has no decision, so it cannot appear in the decision-based evidence at all. **Rejected
 decisions are only ever negative evidence**: they lower a pattern's balance and can never raise a score.
+
+**Evidence independence: one underlying pair is one observation.** Stage 5E lets a rejected pair return to the unmatched pool, so the same
+bank transaction and ledger transaction can be proposed, and rejected, again in every later run (verified with the real engine: the same pair
+was proposed and decided in three consecutive runs). Those decision records are not independent examples of a pattern. Without a rule, five
+rejections of one pair across five runs would look like five examples from five runs and could satisfy `min_evidence` and `min_distinct_runs`
+by themselves. The policy:
+
+* An **observation** is identified by *(bank transaction, ledger transaction, currency, direction, match type)* within the entity and bank
+  account. Each observation is counted **at most once** for a learning cycle, in `n`, in the accepted and rejected counts, in the
+  leave-one-out stability check and in the pattern balance.
+* Among a pair's **eligible** decisions (the cutoff, age window and every eligibility check above still apply first) the **latest** is
+  authoritative; ties on the timestamp are broken by decision id, so the choice is deterministic. The observation belongs to that decision's
+  run, so superseded decisions add no phantom runs to `min_distinct_runs`.
+* The earlier decisions are **never deleted or altered**. They are counted as `SUPERSEDED_BY_LATER_DECISION_ON_SAME_PAIR`, and their ids are
+  kept with the observation (`superseded_decision_ids`) and on the stored explanation, so everything stays traceable to the authoritative
+  Stage 5E records.
+* **Conflicting histories** are handled by the same rule and reported, not hidden. Accepted pairs are claimed and cannot be proposed again,
+  so a conflict in practice is *rejected, then accepted*; the later decision is the human's current judgement and decides. Such pairs are
+  counted in `pairs_with_conflicting_dispositions` (health view and the stored settings snapshot).
+* The same pair decided under different match types is two observations, because evidence is only ever combined within one match type.
 
 **Corrected or invalidated decisions.** Stage 5E has no decision-reversal workflow (decisions are final), so none is invented. The
 existing supported ways a decision's basis can be invalidated are handled: a bank row later marked `REVERSED` or a ledger row no longer
@@ -190,6 +210,10 @@ the default order and membership are unchanged. `/reconciliation/adaptive` provi
 * Evidence is derived live from authoritative rows. A stored explanation never changes, but recomputing one after the underlying
   transactions were edited could differ. (No production code path edits their narration, counterparty or reference fields.)
 * The evidence scan covers the most recent 5,000 decisions per account (flagged in the health view if reached).
+* Independence is by underlying **pair**. The same bank row paired with different ledger rows in different runs (or the reverse) counts as
+  separate observations, because they are different proposals.
+* Explanations stored before the evidence-independence correction (commit `16618ca`) were computed with per-decision counting. They are
+  immutable and are deliberately **not recomputed**; only runs executed afterwards use the corrected policy.
 * Runs executed before adaptive matching was enabled have no explanations; there is no re-run or backfill.
 * Ties, review-tier suggestions and placeholders receive informational scores but remain exceptions; they are not decidable.
 * Learned pattern labels (for example a payee template) are visible to anyone with `VIEW` on that entity, but never any transaction
@@ -203,7 +227,7 @@ the default order and membership are unchanged. `/reconciliation/adaptive` provi
 
 PostgreSQL 16.15, using the documented disposable database (`docs/TEST_DATABASE_SAFETY.md`); the safety guard was not changed.
 
-* New tests (128): pure logic 64, learning evidence 19, scoring / workflow / versioning 30, API 11, migration 4.
+* New tests (139): pure logic 64, learning evidence 19, evidence independence 11, scoring / workflow / versioning 30, API 11, migration 4.
 * Covered: eligibility and every exclusion reason; traceability; cutoff; isolation by entity, account, direction, match type and group;
   boosts, penalties, fallback, cap, anomaly resistance; tier-lock on real rows at 69 and 70; ties, review-tier and placeholders stay
   non-decidable; explicit accept and reject through Stage 5E; claim uniqueness (409); no financial side effects; immutability and scope
@@ -212,7 +236,8 @@ PostgreSQL 16.15, using the documented disposable database (`docs/TEST_DATABASE_
   downgrade and data preservation.
 * Mutation checks: nine safeguards were deliberately broken (account isolation, entity isolation, tier-lock, minimum evidence, the
   single-decision stability check, rejections-as-accepted, the contribution cap, idempotency, and the enabled-by-default setting). Each
-  was caught by a test, after strengthening two tests that initially did not catch their mutation.
+  was caught by a test, after strengthening two tests that initially did not catch their mutation. The evidence-independence correction
+  has its own mutation checks (no de-duplication, earliest instead of latest decision, match type dropped from the pair key), all caught.
 
 ## 13. Operational guidance
 

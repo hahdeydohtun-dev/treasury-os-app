@@ -13,7 +13,7 @@ All arithmetic is Decimal.
 """
 import datetime
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
@@ -51,6 +51,7 @@ EXCLUSION_REASONS = (
     "GROUP_PROPOSAL_NOT_LEARNED_IN_V1", "SUGGESTION_MISSING", "INVALID_DECISION_RECORD", "STATUS_MISMATCH", "INCOMPLETE_SUGGESTION",
     "RUN_MISMATCH", "RUN_NOT_COMPLETED", "TRANSACTION_MISSING", "SCOPE_MISMATCH", "CURRENCY_MISMATCH", "BANK_TRANSACTION_REVERSED",
     "LEDGER_TRANSACTION_NOT_POSTED", "ACCEPTED_WITHOUT_CLAIM", "OUTSIDE_EVIDENCE_WINDOW",
+    "SUPERSEDED_BY_LATER_DECISION_ON_SAME_PAIR",
 )
 
 
@@ -64,14 +65,19 @@ class EvidenceRow:
     direction: str
     match_type: str
     signals: dict
+    pair: tuple = ()                           # (bank transaction id, ledger transaction id): the underlying pair this decision is about
+    superseded_decision_ids: tuple = ()        # earlier eligible decisions about the SAME pair: kept for audit, never counted
+    conflicting: bool = False                  # an earlier decision about the same pair had a different disposition
 
 
 @dataclass
 class LoadedEvidence:
-    rows: list = field(default_factory=list)
+    rows: list = field(default_factory=list)   # one row per UNDERLYING PAIR (an observation), each carrying its authoritative decision
     exclusions: dict = field(default_factory=dict)
     scanned: int = 0
     truncated: bool = False
+    superseded: int = 0                        # eligible decisions not counted because a later decision about the same pair exists
+    conflicting_pairs: int = 0                 # pairs whose decisions disagreed (the latest one decides)
 
 
 def _fields() -> dict:
@@ -123,6 +129,39 @@ def classify_decision(m: Any, entity_id: uuid.UUID, account_id: uuid.UUID, cutof
     return None
 
 
+def collapse_to_observations(rows: list) -> tuple[list, int, int]:
+    """
+    Evidence INDEPENDENCE. Stage 5E lets a rejected pair return to the unmatched pool, so the same bank row and ledger row can be
+    proposed and decided again in every later run. Those decisions are not independent examples of a pattern: one underlying pair is
+    ONE observation, however many times it was decided.
+
+    An observation is identified by (bank transaction, ledger transaction, currency, direction, match type) within the entity and
+    bank account the rows were loaded for. Among a pair's eligible decisions the LATEST is authoritative (ties broken by decision id,
+    so the choice is deterministic); the run counted for the observation is that decision's run. The earlier decisions are not deleted
+    or altered: their ids travel with the observation (`superseded_decision_ids`) and they are counted, so nothing disappears silently.
+    Accepted pairs are claimed and cannot be proposed again, so a conflicting history is in practice 'rejected, then accepted', where
+    the later disposition is the human's current judgement.
+
+    Returns (observations, superseded decisions, pairs with disagreeing dispositions).
+    """
+    groups: dict = {}
+    for e in rows:
+        key = (e.pair, e.currency, e.direction, e.match_type) if e.pair else ("decision", e.decision_id)    # no pair identity: stays independent
+        groups.setdefault(key, []).append(e)
+    observations, superseded, conflicting = [], 0, 0
+    for members in groups.values():
+        *older, latest = sorted(members, key=lambda e: (e.decided_at, str(e.decision_id)))
+        if not older:
+            observations.append(latest)
+            continue
+        disagree = any(o.accepted != latest.accepted for o in older)
+        observations.append(replace(latest, superseded_decision_ids=tuple(o.decision_id for o in older), conflicting=disagree))
+        superseded += len(older)
+        conflicting += 1 if disagree else 0
+    observations.sort(key=lambda e: (e.decided_at, str(e.decision_id)))
+    return observations, superseded, conflicting
+
+
 async def load_evidence(db: AsyncSession, entity_id: uuid.UUID, account_id: uuid.UUID, cutoff: datetime.datetime,
                         settings: AdaptiveSettings) -> LoadedEvidence:
     """All decisions of THIS entity and bank account decided strictly before `cutoff`, classified. Nothing outside the scope is read."""
@@ -137,6 +176,7 @@ async def load_evidence(db: AsyncSession, entity_id: uuid.UUID, account_id: uuid
     raw = (await db.execute(stmt)).all()
     out = LoadedEvidence(exclusions={r: 0 for r in EXCLUSION_REASONS})
     out.truncated = len(raw) > MAX_DECISIONS_SCANNED
+    eligible: list = []
     for row in raw[:MAX_DECISIONS_SCANNED]:
         m = row._mapping
         out.scanned += 1
@@ -148,9 +188,12 @@ async def load_evidence(db: AsyncSession, entity_id: uuid.UUID, account_id: uuid
             bank_date=m["b_date"], ledger_date=m["t_date"], bank_amount=m["b_amount"], ledger_amount=m["t_amount"],
             bank_references=(m["b_ref"], m["b_ext"]), ledger_references=(m["t_ref"], m["t_ext"]),
             bank_narration=m["b_narr"], ledger_counterparty=m["t_party"])
-        out.rows.append(EvidenceRow(
+        eligible.append(EvidenceRow(
             decision_id=m["d_id"], run_id=m["d_run"], decided_at=m["d_at"], accepted=m["d_decision"] == MatchDecisionType.ACCEPTED,
-            currency=m["b_currency"], direction=m["b_entry"].value, match_type=m["s_type"].value, signals=pair_signals(pair)))
+            currency=m["b_currency"], direction=m["b_entry"].value, match_type=m["s_type"].value, signals=pair_signals(pair),
+            pair=(m["s_bank"], m["s_ledger"])))
+    out.rows, out.superseded, out.conflicting_pairs = collapse_to_observations(eligible)
+    out.exclusions["SUPERSEDED_BY_LATER_DECISION_ON_SAME_PAIR"] = out.superseded
     return out
 
 
@@ -169,7 +212,8 @@ class PatternStat:
     aw: Decimal = _ZERO
     rw: Decimal = _ZERO
     runs: set = field(default_factory=set)
-    decisions: list = field(default_factory=list)       # (decision_id, accepted, weight)
+    decisions: list = field(default_factory=list)       # (authoritative decision_id, accepted, weight): ONE per underlying pair
+    lineage: dict = field(default_factory=dict)         # authoritative decision_id -> its superseded (earlier, uncounted) decision ids
 
 
 def aggregate(rows: list, cutoff: datetime.datetime, settings: AdaptiveSettings) -> dict:
@@ -187,6 +231,8 @@ def aggregate(rows: list, cutoff: datetime.datetime, settings: AdaptiveSettings)
                 s.rw += weight
             s.runs.add(e.run_id)
             s.decisions.append((e.decision_id, e.accepted, weight))
+            if e.superseded_decision_ids:
+                s.lineage[e.decision_id] = e.superseded_decision_ids
     return stats
 
 
@@ -225,12 +271,15 @@ class PatternEvidence:
     supported: bool
     note: str | None
     decision_ids: tuple
+    superseded_decision_ids: tuple = ()
+    repeated_decisions: int = 0
 
     def to_json(self) -> dict:
         return {"family": self.family, "family_label": FAMILY_LABELS[self.family], "label": self.label, "accepted": self.accepted,
                 "rejected": self.rejected, "balance": str(self.balance.quantize(Decimal("0.001"), ROUND_HALF_UP)),
                 "contribution": str(self.contribution.quantize(_CENT, ROUND_HALF_UP)), "supported": self.supported, "note": self.note,
-                "decision_ids": [str(d) for d in self.decision_ids]}
+                "decision_ids": [str(d) for d in self.decision_ids],
+                "superseded_decision_ids": [str(d) for d in self.superseded_decision_ids], "repeated_decisions": self.repeated_decisions}
 
 
 @dataclass(frozen=True)
@@ -313,6 +362,9 @@ def score_adaptively(
         family=family, label=key, accepted=stat.accepted, rejected=stat.rejected, balance=balance,
         contribution=contributions.get(family, _ZERO), supported=supported, note=why,
         decision_ids=tuple(d for d, _a, _w in sorted(stat.decisions, key=lambda x: str(x[0]))[:50]) if supported else (),
+        superseded_decision_ids=tuple(s for d, _a, _w in sorted(stat.decisions, key=lambda x: str(x[0]))[:50]
+                                      for s in stat.lineage.get(d, ())) if supported else (),
+        repeated_decisions=sum(len(v) for v in stat.lineage.values()),
     ) for family, key, stat, supported, balance, why in considered]
 
     used = supported_rows if fallback_reason is None else []

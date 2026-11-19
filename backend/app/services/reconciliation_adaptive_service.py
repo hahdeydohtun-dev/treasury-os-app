@@ -71,7 +71,8 @@ async def _annotate(db: AsyncSession, run: ReconciliationRun, configuration, par
     stats = aggregate(evidence.rows, cutoff, settings)
     result.evidence_decisions = len(evidence.rows)
     snapshot = {"settings": settings.to_dict(), "warnings": parsed.warnings, "evidence_decisions_scanned": evidence.scanned,
-                "evidence_decisions_eligible": len(evidence.rows), "evidence_truncated": evidence.truncated}
+                "evidence_decisions_eligible": len(evidence.rows), "evidence_decisions_superseded": evidence.superseded,
+                "evidence_pairs_with_conflicting_dispositions": evidence.conflicting_pairs, "evidence_truncated": evidence.truncated}
     for suggestion, bank, ledger in rows:
         if bank.currency_code != ledger.transaction_currency_code:
             continue
@@ -131,7 +132,7 @@ def explanation_text(row: ReconciliationAdaptiveScore) -> str:
                 f"The recommendation equals the deterministic score. This is a suggestion only; a person must accept or reject it.")
     sign = "+" if row.adaptive_contribution >= 0 else ""
     return (f"Deterministic score {row.deterministic_score}. Patterns learned from {row.accepted_examples} accepted and "
-            f"{row.rejected_examples} rejected earlier decisions on this account adjusted it by {sign}{row.adaptive_contribution} "
+            f"{row.rejected_examples} rejected distinct transaction pairs decided earlier on this account adjusted it by {sign}{row.adaptive_contribution} "
             f"(support {row.support_level}) to a recommendation of {row.recommendation_score}. "
             f"This is a suggestion only; a person must accept or reject it.")
 
@@ -139,9 +140,10 @@ def explanation_text(row: ReconciliationAdaptiveScore) -> str:
 def explanation_payload(row: ReconciliationAdaptiveScore, *, include_decision_ids: bool = False) -> dict:
     patterns = []
     for p in row.evidence:
-        item = {k: v for k, v in p.items() if k != "decision_ids"}
+        item = {k: v for k, v in p.items() if k not in ("decision_ids", "superseded_decision_ids")}
         if include_decision_ids:
             item["decision_ids"] = p.get("decision_ids", [])
+            item["superseded_decision_ids"] = p.get("superseded_decision_ids", [])
         patterns.append(item)
     return {
         "suggestion_id": str(row.suggestion_id), "reconciliation_run_id": str(row.reconciliation_run_id),

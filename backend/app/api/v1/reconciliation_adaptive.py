@@ -182,6 +182,7 @@ async def learning_health(
             "decisions_scanned": evidence.scanned, "scan_truncated": evidence.truncated, "eligible": len(evidence.rows),
             "eligible_accepted": sum(1 for e in evidence.rows if e.accepted), "eligible_rejected": sum(1 for e in evidence.rows if not e.accepted),
             "excluded_by_reason": {k: v for k, v in evidence.exclusions.items() if v},
+            "repeated_decisions_superseded": evidence.superseded, "pairs_with_conflicting_dispositions": evidence.conflicting_pairs,
             "latest_eligible_decision_at": max((e.decided_at for e in evidence.rows), default=None),
         },
         "patterns_by_family": per_family,
